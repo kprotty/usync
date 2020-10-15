@@ -15,15 +15,20 @@
 //! Wrappers for [`core::sync`] which allow a central place to substitute platform atomics and shared mutability.
 
 #[cfg(feature = "loom")]
-pub use if_loom::*;
+pub(crate) use if_loom::*;
 #[cfg(feature = "loom")]
 mod if_loom {
-    pub const TRUE: bool = true;
-    pub const FALSE: bool = false;
     pub(crate) use loom::{
         cell::UnsafeCell,
-        sync::atomic::{fence, spin_loop_hint, AtomicBool, AtomicU8, AtomicUsize, Ordering},
+        sync::atomic::{fence, spin_loop_hint, AtomicU8, AtomicUsize, Ordering},
     };
+
+    pub(crate) type Int = u8;
+    pub(crate) type AtomicInt = AtomicU8;
+
+    pub(crate) const TRUE: bool = true;
+    pub(crate) const FALSE: bool = false;
+    pub(crate) use loom::sync::atomic::AtomicBool;
 }
 
 #[cfg(not(feature = "loom"))]
@@ -38,8 +43,21 @@ mod if_core {
     #[cfg(target_atomic_u8)]
     pub(crate) use core::sync::atomic::AtomicU8;
 
-    #[cfg(target_atomic_bool)]
     pub(crate) use atomic_bool::*;
+    pub(crate) use atomic_int::*;
+
+    #[cfg(target_atomic_u8)]
+    mod atomic_int {
+        pub(crate) type Int = u8;
+        pub(crate) type AtomicInt = super::AtomicU8;
+    }
+
+    #[cfg(not(target_atomic_u8))]
+    mod atomic_int {
+        pub(crate) type Int = usize;
+        pub(crate) type AtomicInt = super::AtomicUsize;
+    }
+
     #[cfg(target_atomic_bool)]
     mod atomic_bool {
         pub(crate) type AtomicBool = core::sync::atomic::AtomicBool;
@@ -48,16 +66,12 @@ mod if_core {
     }
 
     #[cfg(all(not(target_atomic_bool), target_atomic_u8))]
-    pub(crate) use atomic_bool::*;
-    #[cfg(all(not(target_atomic_bool), target_atomic_u8))]
     mod atomic_bool {
         pub(crate) type AtomicBool = super::AtomicU8;
         pub(crate) const TRUE: u8 = 1;
         pub(crate) const FALSE: u8 = 0;
     }
 
-    #[cfg(all(not(target_atomic_bool), not(target_atomic_u8), target_atomic_usize))]
-    pub(crate) use atomic_bool::*;
     #[cfg(all(not(target_atomic_bool), not(target_atomic_u8), target_atomic_usize))]
     mod atomic_bool {
         pub(crate) type AtomicBool = super::AtomicUsize;

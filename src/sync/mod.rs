@@ -15,4 +15,4 @@
 //! A collection of synchronization primitives that you can use as building blocks for concurrent systems.
 
 mod lock;
-pub use lock::{Lock, LockFuture, LockGuard};
+pub use lock::*;

@@ -17,5 +17,11 @@
 mod cache_padded;
 pub use cache_padded::CachePadded;
 
+mod spin_wait;
+pub use spin_wait::SpinWait;
+
+mod waker_parker;
+pub(crate) use waker_parker::WakerParker;
+
 pub(crate) mod sync;
 pub(crate) mod waiter;

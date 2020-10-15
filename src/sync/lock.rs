@@ -14,20 +14,22 @@
 
 #[cfg(target_atomic_u8)]
 use crate::utils::sync::AtomicU8;
-
-#[cfg(any(
-    target_atomic_u8,
-    all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"))
-))]
-use core::mem::size_of;
-
-use crate::utils::{
-    sync::{AtomicUsize, Ordering, UnsafeCell},
-    waiter::Node as WaiterNode,
+use crate::{
+    parker::Parker,
+    utils::{
+        sync::{fence, AtomicUsize, Ordering, UnsafeCell},
+        waiter::Node as WaiterNode,
+        SpinWait, WakerParker,
+    },
 };
 use core::{
     fmt,
+    future::Future,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
+    pin::Pin,
+    ptr::NonNull,
+    task::{Context, Poll},
 };
 
 const UNLOCKED: u8 = 0;
@@ -45,7 +47,35 @@ const WAITING: usize = !511;
 
 #[cfg_attr(not(target_atomic_u8), repr(align(4)))]
 #[cfg_attr(target_atomic_u8, repr(align(512)))]
-struct LockWaiter(WaiterNode<()>);
+struct LockWaiter {
+    node: WaiterNode<()>,
+    waker_parker: WakerParker,
+}
+
+impl LockWaiter {
+    /// Create an empty LockWaiter
+    fn new() -> Self {
+        Self {
+            node: WaiterNode::new(()),
+            waker_parker: WakerParker::new(),
+        }
+    }
+
+    /// Get the parent LockWaiter reference from its `node` field reference.
+    ///
+    /// Safety: caller must ensure that the node reference actually lives inside a LockWaiter.
+    unsafe fn from_node(node: &WaiterNode<()>) -> &Self {
+        let stub = Self::new();
+
+        let base_ptr = &stub as *const _ as usize;
+        let field_ptr = &stub.node as *const _ as usize;
+        let field_offset = field_ptr - base_ptr;
+
+        let node_ptr = node as *const _ as usize;
+        let self_ptr = node_ptr - field_offset;
+        &*(self_ptr as *const Self)
+    }
+}
 
 /// A mutual exclusioin primitive useful for protecting shared data.
 ///
@@ -126,10 +156,18 @@ impl<T> Lock<T> {
         self.value.into_inner()
     }
 
+    /// Returns true if the Lock is currently owned by a thread.
+    #[inline]
+    pub fn is_locked(&self) -> bool {
+        let state = self.state.load(Ordering::Relaxed);
+        state & (LOCKED as usize) != 0
+    }
+
     /// For platforms which support byte-level atomics,
     /// get a reference to the state as an AtomicU8 as opposed to an AtomicUsize.
     #[cfg(target_atomic_u8)]
     fn byte_state(&self) -> &AtomicU8 {
+        use core::mem::size_of;
         assert!(
             size_of::<AtomicU8>() <= size_of::<AtomicUsize>(),
             "AtomicU8 is larger than AtomicUsize for this platform",
@@ -156,6 +194,7 @@ impl<T> Lock<T> {
         //
         // Another advantage over swap (`xchg`) is that it need not invalidate the
         // cache line if the bit is already set.
+        use core::mem::size_of;
         assert!(
             size_of::<AtomicUsize>() >= size_of::<u16>(),
             "AtomicUsize cannot be used with `lock btsw`",
@@ -252,6 +291,26 @@ impl<T> Lock<T> {
             .map(|_| LockGuard { lock: self })
     }
 
+    /// Returns a [`Future`] which acquires the `Lock`.
+    pub fn lock_async<P: Parker>(&self) -> LockFuture<'_, P, T> {
+        LockFuture::new(match self.lock_fast() {
+            Some(guard) => LockFutureState::Acquired(guard),
+            None => LockFutureState::Locking(self),
+        })
+    }
+
+    /// Acquires the `Lock`, blocking the current thread using
+    /// and instance of the provided [`Parker`] until it is able to take ownership.
+    #[inline]
+    pub fn lock<P: Parker>(&self) -> LockGuard<'_, T> {
+        self.lock_fast().unwrap_or_else(|| self.lock_slow::<P>())
+    }
+
+    #[cold]
+    fn lock_slow<P: Parker>(&self) -> LockGuard<'_, T> {
+        unimplemented!("TODO")
+    }
+
     /// Unlocks the Lock and potentially wakes up any LockWaiter waiting on the lock.
     ///
     /// # Safety
@@ -301,38 +360,307 @@ impl<T> Lock<T> {
 
     #[cold]
     fn unlock_slow(&self) {
-        unimplemented!("TODO")
+        // Try to acquire the rights to waking up a waiting thread which will retry acquiring the lock.
+        //
+        // If there are no waiting threads then we bail.
+        // If theres already a thread waking, no need to wake another, so we bail.
+        // If the Lock is currently owned by another thread, bail and have that other thread do the waking.
+        //
+        // See the 'dequeue loop comment for justification about the Acquire success ordering.
+        let mut state = self.state.load(Ordering::Relaxed);
+        loop {
+            if (state & WAITING == 0) || (state & (WAKING | (LOCKED as usize)) != 0) {
+                return;
+            }
+            match self.state.compare_exchange_weak(
+                state,
+                state | WAKING,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break state |= WAKING,
+                Err(e) => state = e,
+            }
+        }
+
+        'dequeue: loop {
+            // Starting from the head WaiterNode of the queue,
+            // traverse the doubly-linked list queue until a node with a set tail is found.
+            // The first node to enqueue itself sets the tail so the loop is eventually bounded.
+            //
+            // Once the tail is found, cache it on the head node so that future traversals
+            // don't have to re-trace the queue again, effectively making this traversal
+            // amortized O(n) where n = amount of LockWaiters/WaiterNode's in the queue.
+            //
+            // # Safety:
+            //
+            // There exist an acquire barrier when control flow reaches this point
+            // so the head/tail reads here synchronize with any Release updates
+            // done by the previous `unlock_slow()` thread.
+            //
+            // We also acquired ownership of the `WAKING` bit above and ensured that
+            // there is at least one thread in the queue for us to dequeue & wake up.
+            let (head, tail) = unsafe {
+                let head = NonNull::new((state & WAITING) as *mut LockWaiter);
+                let head = head.expect("Lock::unlock_slow() without any LockWaiters");
+                let tail = head.as_ref().node.tail.get().unwrap_or_else(|| {
+                    let mut current = NonNull::from(&head.as_ref().node);
+                    loop {
+                        let next = current.as_ref().next.get();
+                        let next = next.expect("Lock::unlock_slow() invalid link");
+                        next.as_ref().prev.set(Some(current));
+                        current = next;
+                        if let Some(tail) = current.as_ref().tail.get() {
+                            head.as_ref().node.tail.set(Some(tail));
+                            break tail;
+                        }
+                    }
+                });
+                (&*head.as_ptr(), LockWaiter::from_node(&*tail.as_ptr()))
+            };
+
+            // If the `Lock` is currently owned by another thread,
+            // its better to have that thread do the waking instead.
+            //
+            // Release barrier on success so future `unlock_slow()` threads see the head/tail writes we did above.
+            // Acquire barrier on re-loop as explained in the 'dequeue loop comment.
+            if state & (LOCKED as usize) != 0 {
+                match self.state.compare_exchange_weak(
+                    state,
+                    state & !WAKING,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(e) => state = e,
+                }
+                fence(Ordering::Acquire);
+                continue;
+            }
+
+            // Try to dequeue the tail node
+            match tail.node.prev.get() {
+                // If there are more nodes than the tail in the queue,
+                // then update the head to point to the new tail, effectively dequeueing ours.
+                //
+                // Release ordering to synchronize the head write as explained in the `dequeue loop commment.
+                Some(new_tail) => {
+                    head.node.tail.set(Some(new_tail));
+                    fence(Ordering::Release);
+                }
+                // If the queue will be empty after dequeueing the tail node,
+                // then zero out the head node which effectively marks the queue as empty.
+                //
+                // If a new node was enqueued when we were trying to zero out the head node,
+                // then the new node may point to the tail we're trying to dequeue so we have
+                // to loop back around again to do the dequeue process and ensure the links remain valid.
+                //
+                // Acquire ordering as explained from the `dequeue loop comment
+                None => loop {
+                    match self.state.compare_exchange_weak(
+                        state,
+                        (state & (LOCKED as usize)) | WAKING,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    ) {
+                        Ok(_) => break,
+                        Err(e) => state = e,
+                    }
+                    if state & WAITING != 0 {
+                        fence(Ordering::Acquire);
+                        continue 'dequeue;
+                    }
+                },
+            }
+
+            // We successfully dequeued the tail node from the wait queue.
+            // Wake up its waiter which will try to acquire the lock again.
+            if let Some(waker) = tail.waker_parker.unpark(0) {
+                waker.wake();
+            }
+            return;
+        }
     }
 }
 
 enum LockFutureState<'a, T> {
-    LockFast(&'a Lock<T>),
-    LockSlow(&'a Lock<T>),
+    Locking(&'a Lock<T>),
     Waiting(&'a Lock<T>),
-    Acquired,
+    Acquired(LockGuard<'a, T>),
+    Completed,
 }
 
 /// A Future which blocks until the Lock is acquired.
 ///
 /// This type does not support cancellation.
-#[must_use = "LockFuture will not try to acquire unless polled"]
-pub struct LockFuture<'a, T> {
+#[must_use = "LockFuture will not try to acquire the lock unless polled"]
+pub struct LockFuture<'a, P, T> {
     state: LockFutureState<'a, T>,
     waiter: LockWaiter,
+    _parker: PhantomData<*mut P>,
 }
 
-unsafe impl<'a, T: Send> Send for LockFuture<'a, T> {}
+impl<'a, P, T> Drop for LockFuture<'a, P, T> {
+    fn drop(&mut self) {
+        if let LockFutureState::Waiting(_) = self.state {
+            unreachable!("LockFuture does not support cancellation");
+        }
+    }
+}
 
-impl<'a, T: fmt::Debug> fmt::Debug for LockFuture<'a, T> {
+unsafe impl<'a, P, T: Send> Send for LockFuture<'a, P, T> {}
+
+impl<'a, P, T: fmt::Debug> fmt::Debug for LockFuture<'a, P, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state = match &self.state {
-            LockFutureState::LockFast(_) => "<try_lock>",
-            LockFutureState::LockSlow(_) => "<locking>",
-            LockFutureState::Waiting(_) => "<waiting>",
-            LockFutureState::Acquired => "<acquired>",
-        };
+        f.debug_struct("LockFuture")
+            .field(
+                "state",
+                &match &self.state {
+                    LockFutureState::Locking(_) => "<locking>",
+                    LockFutureState::Waiting(_) => "<waiting>",
+                    LockFutureState::Acquired(_) => "<acquired>",
+                    LockFutureState::Completed => "<completed>",
+                },
+            )
+            .finish()
+    }
+}
 
-        f.debug_struct("LockFuture").field("state", &state).finish()
+impl<'a, P: Parker, T> Future for LockFuture<'a, P, T> {
+    type Output = LockGuard<'a, T>;
+
+    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Safety: Pin promises that the access to the LockFuture is safe
+        // as we don't move the WaiterNode or this future until its dropped.
+        let mut_self = unsafe { Pin::get_unchecked_mut(self) };
+
+        loop {
+            match &mut_self.state {
+                LockFutureState::Locking(lock) => {
+                    match Self::poll_lock(lock, ctx, &mut_self.waiter) {
+                        Poll::Ready(guard) => mut_self.state = LockFutureState::Acquired(guard),
+                        Poll::Pending => {
+                            mut_self.state = LockFutureState::Waiting(lock);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+                LockFutureState::Waiting(lock) => {
+                    match Self::poll_wait(lock, ctx, &mut_self.waiter) {
+                        Poll::Ready(_) => mut_self.state = LockFutureState::Locking(lock),
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+                LockFutureState::Acquired(_) => {
+                    match core::mem::replace(&mut mut_self.state, LockFutureState::Completed) {
+                        LockFutureState::Acquired(guard) => return Poll::Ready(guard),
+                        _ => unreachable!(),
+                    }
+                }
+                LockFutureState::Completed => {
+                    unreachable!("LockFuture polled after completion");
+                }
+            }
+        }
+    }
+}
+
+impl<'a, P: Parker, T> LockFuture<'a, P, T> {
+    fn new(state: LockFutureState<'a, T>) -> Self {
+        Self {
+            state,
+            waiter: LockWaiter::new(),
+            _parker: PhantomData,
+        }
+    }
+
+    #[cfg(any(
+        target_atomic_u8,
+        all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"))
+    ))]
+    #[inline(always)]
+    fn lock_acquire(lock: &'a Lock<T>, _state: usize) -> Result<LockGuard<'a, T>, usize> {
+        lock.try_lock().ok_or_else(|| {
+            P::yield_now(None);
+            lock.state.load(Ordering::Relaxed)
+        })
+    }
+
+    #[cfg(not(any(
+        target_atomic_u8,
+        all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"))
+    )))]
+    #[inline(always)]
+    fn lock_acquire(lock: &'a Lock<T>, state: usize) -> Result<LockGuard<'a, T>, usize> {
+        lock.state
+            .compare_exchange_weak(
+                state,
+                state | (LOCKED as usize),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .map(|_| LockGuard::new(lock))
+    }
+
+    fn poll_lock(
+        lock: &'a Lock<T>,
+        ctx: &Context<'_>,
+        waiter: &LockWaiter,
+    ) -> Poll<LockGuard<'a, T>> {
+        let mut spin_wait = SpinWait::<P>::new();
+        let mut state = lock.state.load(Ordering::Relaxed);
+
+        loop {
+            if state & (LOCKED as usize) == 0 {
+                match Self::lock_acquire(lock, state) {
+                    Ok(guard) => return Poll::Ready(guard),
+                    Err(e) => state = e,
+                }
+                continue;
+            }
+
+            let head = NonNull::new((state & WAITING) as *mut LockWaiter);
+            if head.is_none() && spin_wait.try_spin() {
+                state = lock.state.load(Ordering::Relaxed);
+                continue;
+            }
+
+            unsafe {
+                waiter.waker_parker.prepare(ctx);
+                waiter.node.prev.set(None);
+                waiter.node.tail.set(match head {
+                    Some(_) => None,
+                    None => Some(NonNull::from(&waiter.node)),
+                });
+                waiter.node.next.set(head.and_then(|head_ptr| {
+                    let node_offset = {
+                        let field_ptr = &waiter.node as *const _ as usize;
+                        let base_ptr = waiter as *const _ as usize;
+                        field_ptr - base_ptr
+                    };
+                    let head_ptr = head_ptr.as_ptr() as usize;
+                    let node_ptr = head_ptr + node_offset;
+                    NonNull::new(node_ptr as *mut WaiterNode<()>)
+                }));
+            }
+
+            match lock.state.compare_exchange_weak(
+                state,
+                (state & !WAITING) | (waiter as *const _ as usize),
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Poll::Pending,
+                Err(e) => state = e,
+            }
+        }
+    }
+
+    fn poll_wait(_lock: &'a Lock<T>, ctx: &Context<'_>, waiter: &LockWaiter) -> Poll<()> {
+        match waiter.waker_parker.park(ctx) {
+            Poll::Ready(_) => Poll::Ready(()),
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -351,6 +679,13 @@ impl<'a, T> LockGuard<'a, T> {
     }
 }
 
+impl<'a, T> Drop for LockGuard<'a, T> {
+    fn drop(&mut self) {
+        // Safety: our existence implies lock ownership of the Lock
+        unsafe { self.lock.unlock() }
+    }
+}
+
 impl<'a, T: fmt::Debug> fmt::Debug for LockGuard<'a, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         (&&*self).fmt(f)
@@ -361,12 +696,58 @@ impl<'a, T> Deref for LockGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
+        // Safety: our existence implies ownership of the Lock's value
         self.lock.value.with(|ptr| unsafe { &*ptr })
     }
 }
 
 impl<'a, T> DerefMut for LockGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // Safety: our existence implies ownership of the Lock's value
         self.lock.value.with_mut(|ptr| unsafe { &mut *ptr })
+    }
+}
+
+#[cfg(feature = "lock_api")]
+pub use if_lock_api::*;
+
+#[cfg(feature = "lock_api")]
+mod if_lock_api {
+    use super::{Lock, Parker, PhantomData};
+
+    pub struct RawLock<P> {
+        lock: Lock<()>,
+        _parker: PhantomData<P>,
+    }
+
+    unsafe impl<P: Parker> lock_api::RawMutex for RawLock<P> {
+        type GuardMarker = lock_api::GuardSend;
+
+        const INIT: Self = Self {
+            lock: Lock::new(()),
+            _parker: PhantomData,
+        };
+
+        fn is_locked(&self) -> bool {
+            self.lock.is_locked()
+        }
+
+        fn try_lock(&self) -> bool {
+            self.lock
+                .try_lock()
+                .map(|guard| {
+                    core::mem::drop(guard);
+                    true
+                })
+                .unwrap_or(false)
+        }
+
+        fn lock(&self) {
+            self.lock.lock::<P>();
+        }
+
+        unsafe fn unlock(&self) {
+            self.lock.unlock();
+        }
     }
 }
