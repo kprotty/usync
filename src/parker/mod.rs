@@ -1,3 +1,6 @@
+//! Contains core primitives which pause & unpause the caller's OS thread execution.
+//! These serve as the building block for all other data structures in the library.
+
 // Copyright (c) 2020 kprotty
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,14 +15,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Contains core primitives which pause & unpause the caller's OS thread execution.
-//! These serve as the building block for all other data structures in the library.
-
 use core::{ops::Add, time::Duration};
 
+/// A `Parker` is an interface that abstracts out the mechanism in which
+/// a thread can use to pause and unpause execution.
+///
+/// Once a [`Parker`] is created, it can go through the pause/unpause cycle multiple times.
+/// - The thread which owns the Parker called [prepare] to ensure that it can start parking.
+/// - [park] is then called to pause the execution of the calling thread until signalled.
+/// - [unpark] is finally called from another thread to reschedule/continue the execution of the parked thread.
+///
+/// [prepare]: Parker::prepare
+/// [park]: Parker::park
+/// [unpark]: Parker::unpark
 pub unsafe trait Parker {
+    /// Value type which represents a specific point in time for the platform.
     type Instant: Copy + PartialOrd + Add<Duration, Output = Self::Instant>;
 
+    /// Returns the current timestamp as seen from the platform. 
+    /// The instant returned must be monotonic in the sense that no `Instant` returned from a `now()` call in the future can be smaller than one in the past. 
+    /// It is still allowed to never progress, as in the returned Instant can represent the same timestamp for an undefined period of time, but never go backwards.
     fn now() -> Self::Instant;
 
     fn yield_now(iteration: Option<usize>) -> bool;
