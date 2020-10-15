@@ -16,6 +16,7 @@ use super::Parker;
 use crate::utils::sync::{spin_loop_hint, AtomicBool, Ordering, FALSE, TRUE};
 use std::{cell::Cell, fmt, thread, time::Instant};
 
+/// A [`Parker`] implementation powered by `std::{thread, time::Instant}`
 pub struct StdParker {
     is_notified: AtomicBool,
     thread: Cell<Option<thread::Thread>>,
@@ -93,7 +94,7 @@ unsafe impl Parker for StdParker {
         }
     }
 
-    fn try_park_until(&self, deadline: Self::Instant) -> bool {
+    fn park_until(&self, deadline: Self::Instant) -> bool {
         loop {
             if self.is_notified.load(Ordering::Acquire) != FALSE {
                 return true;

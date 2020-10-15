@@ -16,6 +16,7 @@ use super::Parker;
 use crate::utils::sync::{spin_loop_hint, AtomicBool, Ordering, FALSE, TRUE};
 use core::{fmt, ops::Add, time::Duration};
 
+/// A [`Parker`] implementation which spins to simulate blocking and uses a no-op `Instant`.
 pub struct SpinParker {
     is_notified: AtomicBool,
 }
@@ -65,7 +66,7 @@ unsafe impl Parker for SpinParker {
         }
     }
 
-    fn try_park_until(&self, _deadline: Self::Instant) -> bool {
+    fn park_until(&self, _deadline: Self::Instant) -> bool {
         self.park();
         true
     }

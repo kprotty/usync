@@ -29,36 +29,89 @@ use core::{ops::Add, time::Duration};
 /// [park]: Parker::park
 /// [unpark]: Parker::unpark
 pub unsafe trait Parker {
-    /// Value type which represents a specific point in time for the platform.
+    /// Value type which represents a specific point in time for the Parker platform.
     type Instant: Copy + PartialOrd + Add<Duration, Output = Self::Instant>;
 
-    /// Returns the current timestamp as seen from the platform. 
-    /// The instant returned must be monotonic in the sense that no `Instant` returned from a `now()` call in the future can be smaller than one in the past. 
-    /// It is still allowed to never progress, as in the returned Instant can represent the same timestamp for an undefined period of time, but never go backwards.
+    /// Return the current timestamp as known by the Parker platform.
+    /// The returned `Instant` returned must guarantee to be no less than any previously created Instant.
+    /// It is however O.K to return an instant in which time stops, slows down or speed up.
+    /// But it must always be monotonic and never go backwards.
     fn now() -> Self::Instant;
 
+    /// Provides a hint to the Parker platform to yield execution of the caller
+    /// indicating that it is free to schedule anything else for a breif moment.
+    ///
+    /// The iteration represents how many times it has been called under a given context.
+    /// No iteration provided (`None`) indicates that there is no context and any type of yielding is fine.
+    ///
+    /// Returns whether or not the caller is allowed to yield again given the iteration context.
+    /// This can be used to indicate to the caller that its better to [park] instead of yielding.
+    ///
+    /// [park]: Parker::park
     fn yield_now(iteration: Option<usize>) -> bool;
 
+    /// Creates an instance of the `Parker` which can be used to repeatedly
+    /// pause and unpause execution of the calling thread.
     fn new() -> Self;
 
+    /// Prepare the parker to be parked.
+    /// This must be called before [park] and [park_until].
+    /// Failing to do so may result in a panic, deadlock, etc. but not undefined behavior.
+    ///
+    /// [park]: Parker::park
+    /// [park_until]: Parker::park_until
     fn prepare(&self);
 
+    /// Pause execution of the calling thread until another thread invokes [unpark].
+    /// [prepare] must be called before hand.
+    ///
+    /// [prepare]: Parker::prepare
+    /// [unpark]: Parker::unpark
     fn park(&self);
 
-    fn try_park_until(&self, deadline: Self::Instant) -> bool;
+    /// Pause execution of the calling thread until another thread invokes [unpark]
+    /// or until the deadline provided is reached. [prepare] must be called before hand.
+    /// Returns false if the call timed out and reached the deadline.
+    ///
+    /// [prepare]: Parker::prepare
+    /// [unpark]: Parker::unpark
+    fn park_until(&self, deadline: Self::Instant) -> bool;
 
+    /// Unpause execution of the thread that is paused under a call to [park] or [park_until].
+    /// It is not necessary that the caller switch to execution of the parked thread,
+    /// only that it schedules it to eventually continue execution.
+    ///
+    /// [prepare] must be called before-hand and after a successfull call to `unpark`,
+    /// [prepare] must be called again in if the thread wishes to pause execution again
+    ///
+    /// [prepare]: Parker::prepare
+    /// [park]: Parker::park
+    /// [park_until]: Parker::park_until
     fn unpark(&self);
 }
 
+/// Aliases some [`Parker`] that is available to the current target.
+/// It may use OS blocking primitives if available or it may use spinning.
 #[cfg(any(feature = "os", feature = "std"))]
 pub type DefaultParker = SystemParker;
+
+/// Aliases some [`Parker`] that is available to the current target.
+/// It may use OS blocking primitives if available or it may use spinning.
 #[cfg(not(any(feature = "os", feature = "std")))]
 pub type DefaultParker = SpinParker;
 
+/// Aliases a [`Parker`] that is available to the current target
+/// which communicates with the underlying OS for `Instant` and blocking/unblocking.
 #[cfg(all(feature = "std", not(feature = "os")))]
 pub type SystemParker = StdParker;
+
+/// Aliases a [`Parker`] that is available to the current target
+/// which communicates with the underlying OS for `Instant` and blocking/unblocking.
 #[cfg(all(feature = "os", not(feature = "std")))]
 pub type SystemParker = OsParker;
+
+/// Aliases a [`Parker`] that is available to the current target
+/// which communicates with the underlying OS for `Instant` and blocking/unblocking.
 #[cfg(any(feature = "std", feature = "os"))]
 pub type SystemParker = StdParker; // OsParker;
 
