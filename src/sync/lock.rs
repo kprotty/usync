@@ -295,7 +295,10 @@ impl<T> Lock<T> {
     pub fn lock_async<P: Parker>(&self) -> LockFuture<'_, P, T> {
         LockFuture::new(match self.lock_fast() {
             Some(guard) => LockFutureState::Acquired(guard),
-            None => LockFutureState::Locking(self),
+            None => LockFutureState::Locking {
+                lock: self,
+                is_waking: false,
+            },
         })
     }
 
@@ -308,7 +311,22 @@ impl<T> Lock<T> {
 
     #[cold]
     fn lock_slow<P: Parker>(&self) -> LockGuard<'_, T> {
-        unimplemented!("TODO")
+        let parker = P::new();
+        let waker = unsafe { WakerParker::of(&parker) };
+
+        let mut ctx = Context::from_waker(&waker);
+        let mut future = LockFuture::<'_, P, T>::new(LockFutureState::Locking {
+            lock: self,
+            is_waking: false,
+        });
+
+        loop {
+            let pinned = unsafe { Pin::new_unchecked(&mut future) };
+            match pinned.poll(&mut ctx) {
+                Poll::Ready(guard) => return guard,
+                Poll::Pending => parker.park(),
+            }
+        }
     }
 
     /// Unlocks the Lock and potentially wakes up any LockWaiter waiting on the lock.
@@ -484,7 +502,7 @@ impl<T> Lock<T> {
 }
 
 enum LockFutureState<'a, T> {
-    Locking(&'a Lock<T>),
+    Locking { lock: &'a Lock<T>, is_waking: bool },
     Waiting(&'a Lock<T>),
     Acquired(LockGuard<'a, T>),
     Completed,
@@ -516,7 +534,7 @@ impl<'a, P, T: fmt::Debug> fmt::Debug for LockFuture<'a, P, T> {
             .field(
                 "state",
                 &match &self.state {
-                    LockFutureState::Locking(_) => "<locking>",
+                    LockFutureState::Locking { .. } => "<locking>",
                     LockFutureState::Waiting(_) => "<waiting>",
                     LockFutureState::Acquired(_) => "<acquired>",
                     LockFutureState::Completed => "<completed>",
@@ -536,8 +554,8 @@ impl<'a, P: Parker, T> Future for LockFuture<'a, P, T> {
 
         loop {
             match &mut_self.state {
-                LockFutureState::Locking(lock) => {
-                    match Self::poll_lock(lock, ctx, &mut_self.waiter) {
+                LockFutureState::Locking { lock, is_waking } => {
+                    match Self::poll_lock(lock, *is_waking, ctx, &mut_self.waiter) {
                         Poll::Ready(guard) => mut_self.state = LockFutureState::Acquired(guard),
                         Poll::Pending => {
                             mut_self.state = LockFutureState::Waiting(lock);
@@ -545,12 +563,15 @@ impl<'a, P: Parker, T> Future for LockFuture<'a, P, T> {
                         }
                     }
                 }
-                LockFutureState::Waiting(lock) => {
-                    match Self::poll_wait(lock, ctx, &mut_self.waiter) {
-                        Poll::Ready(_) => mut_self.state = LockFutureState::Locking(lock),
-                        Poll::Pending => return Poll::Pending,
+                LockFutureState::Waiting(lock) => match Self::poll_wait(ctx, &mut_self.waiter) {
+                    Poll::Ready(_) => {
+                        mut_self.state = LockFutureState::Locking {
+                            lock,
+                            is_waking: true,
+                        };
                     }
-                }
+                    Poll::Pending => return Poll::Pending,
+                },
                 LockFutureState::Acquired(_) => {
                     match core::mem::replace(&mut mut_self.state, LockFutureState::Completed) {
                         LockFutureState::Acquired(guard) => return Poll::Ready(guard),
@@ -604,11 +625,16 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
 
     fn poll_lock(
         lock: &'a Lock<T>,
+        is_waking: bool,
         ctx: &Context<'_>,
         waiter: &LockWaiter,
     ) -> Poll<LockGuard<'a, T>> {
         let mut spin_wait = SpinWait::<P>::new();
-        let mut state = lock.state.load(Ordering::Relaxed);
+        let mut state = if is_waking {
+            lock.state.fetch_sub(WAKING, Ordering::Relaxed) - WAKING
+        } else {
+            lock.state.load(Ordering::Relaxed)
+        };
 
         loop {
             if state & (LOCKED as usize) == 0 {
@@ -656,7 +682,7 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
         }
     }
 
-    fn poll_wait(_lock: &'a Lock<T>, ctx: &Context<'_>, waiter: &LockWaiter) -> Poll<()> {
+    fn poll_wait(ctx: &Context<'_>, waiter: &LockWaiter) -> Poll<()> {
         match waiter.waker_parker.park(ctx) {
             Poll::Ready(_) => Poll::Ready(()),
             Poll::Pending => Poll::Pending,

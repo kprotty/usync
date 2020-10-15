@@ -13,14 +13,28 @@
 // limitations under the License.
 
 use crate::parker::Parker;
-use core::marker::PhantomData;
+use core::{fmt, marker::PhantomData};
 
+/// A SpinWait wraps the `yield_now` funciton of a `Parker` to implement context based yielding.
 pub struct SpinWait<P> {
     iteration: Option<usize>,
     _parker: PhantomData<*mut P>,
 }
 
+impl<P> fmt::Debug for SpinWait<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SpinWait").finish()
+    }
+}
+
+impl<P> Default for SpinWait<P> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<P> SpinWait<P> {
+    /// Create a new SpinWait with a reset state.
     pub const fn new() -> Self {
         Self {
             iteration: Some(0),
@@ -28,18 +42,23 @@ impl<P> SpinWait<P> {
         }
     }
 
+    /// Reset the SpinWait back to the starting state.
     pub fn reset(&mut self) {
         self.iteration = Some(0);
     }
 }
 
 impl<P: Parker> SpinWait<P> {
-    pub fn force_spin(&mut self) {
+    /// Yield on the parker, using the context if available and
+    /// falling back to no-context yielding when saturated.
+    pub fn spin(&mut self) {
         if !self.try_spin() {
             P::yield_now(None);
         }
     }
 
+    /// Try to yield using the context if it hasn't been saturated yet.
+    /// Returns true if the caller can or should spin again.
     pub fn try_spin(&mut self) -> bool {
         self.iteration = self.iteration.and_then(|iteration| {
             if P::yield_now(Some(iteration)) {

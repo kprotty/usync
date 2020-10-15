@@ -36,17 +36,23 @@ mod sym_lock;
 mod word_lock;
 mod word_lock_fair;
 mod word_lock_waking;
+mod usync_lock;
 
 fn bench_all(b: &mut Benchmarker) {
     // b.bench::<spin_lock::Lock>();
-    b.bench::<sym_lock::Lock>();
+    
+    b.bench::<usync_lock::Lock>();
+    b.bench::<word_lock_waking::Lock>();
+
     b.bench::<os_lock::Lock>();
-    b.bench::<simple_mutex_lock::Lock>();
+    // b.bench::<simple_mutex_lock::Lock>();
     b.bench::<parking_lot_lock::Lock>();
+    b.bench::<sym_lock::Lock>();
+
     // b.bench::<plot_lock::Lock>();
     // b.bench::<word_lock::Lock>();
     // b.bench::<word_lock_fair::Lock>();
-    b.bench::<word_lock_waking::Lock>();
+    
 
     // b.bench::<keyed_lock::Lock>();
 
