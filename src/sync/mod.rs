@@ -12,5 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! A collection of synchronization primitives that you can use as building blocks for concurrent systems.
+
 mod lock;
 pub use lock::{Lock, LockFuture, LockGuard};

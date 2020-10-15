@@ -1,6 +1,3 @@
-//! Contains core primitives which pause & unpause the caller's OS thread execution.
-//! These serve as the building block for all other data structures in the library.
-
 // Copyright (c) 2020 kprotty
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+//! Contains core primitives which pause & unpause the caller's OS thread execution.
+//! These serve as the building block for all other data structures in the library.
 
 use core::{ops::Add, time::Duration};
 

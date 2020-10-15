@@ -18,3 +18,4 @@ mod cache_padded;
 pub use cache_padded::CachePadded;
 
 pub(crate) mod sync;
+pub(crate) mod waiter;

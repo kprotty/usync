@@ -21,7 +21,10 @@ use crate::utils::sync::AtomicU8;
 ))]
 use core::mem::size_of;
 
-use crate::utils::sync::{AtomicUsize, Ordering, UnsafeCell};
+use crate::utils::{
+    sync::{AtomicUsize, Ordering, UnsafeCell},
+    waiter::Node as WaiterNode,
+};
 use core::{
     fmt,
     ops::{Deref, DerefMut},
@@ -42,8 +45,22 @@ const WAITING: usize = !511;
 
 #[cfg_attr(not(target_atomic_u8), repr(align(4)))]
 #[cfg_attr(target_atomic_u8, repr(align(512)))]
-struct LockWaiter(());
+struct LockWaiter(WaiterNode<()>);
 
+/// A mutual exclusioin primitive useful for protecting shared data.
+///
+/// This Lock uses a barging/unfair acquire scheme and is throughput oriented.
+/// While this increases the lock's general performance, there is still the theoretical possibility of a live-lock.
+/// Other restrictions also include the lack of cancellation for [`LockFuture`] which allows for more optimizations.
+///
+/// Most times, this is not the mutex that you should be using unless you are writing your own synchronization
+/// primitives which aim to have specific attributes. If so, this throughput oriented mutex could be the right
+/// fit with the following advantages:
+///
+/// * it fits in an `AtomicUsize`
+/// * it supports `const fn` initialization
+/// * it supports both async & thread blocking via [`Parker`]
+/// * it scales almost linearly under condition on modern OS's
 pub struct Lock<T> {
     state: AtomicUsize,
     value: UnsafeCell<T>,
@@ -70,7 +87,31 @@ impl<T> AsMut<T> for Lock<T> {
     }
 }
 
+impl<T: fmt::Debug> fmt::Debug for Lock<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut f = f.debug_struct("Lock");
+        let f = if let Some(guard) = self.try_lock() {
+            f.field("value", &&*guard)
+        } else {
+            f.field("state", &"<locked>")
+        };
+        f.finish()
+    }
+}
+
 impl<T> Lock<T> {
+    /// Create a new Lock in an unlocked state.
+    #[cfg(feature = "loom")]
+    // loom's UnsafeCell doesn't support const fn
+    pub fn new(value: T) -> Self {
+        Self {
+            state: AtomicUsize::new(UNLOCKED as usize),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Create a new Lock in an unlocked state.
+    #[cfg(not(feature = "loom"))]
     pub const fn new(value: T) -> Self {
         Self {
             state: AtomicUsize::new(UNLOCKED as usize),
@@ -78,6 +119,7 @@ impl<T> Lock<T> {
         }
     }
 
+    /// Consumes the mutex and returns the underlying value.
     #[cfg(not(feature = "loom"))]
     // loom's UnsafeCell doesn't appear to have `into_inner`
     pub fn into_inner(self) -> T {
@@ -263,10 +305,42 @@ impl<T> Lock<T> {
     }
 }
 
-pub struct LockFuture<'a, T> {
-    lock: &'a Lock<T>,
+enum LockFutureState<'a, T> {
+    LockFast(&'a Lock<T>),
+    LockSlow(&'a Lock<T>),
+    Waiting(&'a Lock<T>),
+    Acquired,
 }
 
+/// A Future which blocks until the Lock is acquired.
+///
+/// This type does not support cancellation.
+#[must_use = "LockFuture will not try to acquire unless polled"]
+pub struct LockFuture<'a, T> {
+    state: LockFutureState<'a, T>,
+    waiter: LockWaiter,
+}
+
+unsafe impl<'a, T: Send> Send for LockFuture<'a, T> {}
+
+impl<'a, T: fmt::Debug> fmt::Debug for LockFuture<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = match &self.state {
+            LockFutureState::LockFast(_) => "<try_lock>",
+            LockFutureState::LockSlow(_) => "<locking>",
+            LockFutureState::Waiting(_) => "<waiting>",
+            LockFutureState::Acquired => "<acquired>",
+        };
+
+        f.debug_struct("LockFuture").field("state", &state).finish()
+    }
+}
+
+/// A RAII based implementation of a scoped lock for the [`Lock`] mutex.
+/// When it is dropped, the mutex is unlocked.
+///
+/// The internal data protected by the mutex can be accessed through
+/// `Deref` and `DerefMut` from this type.
 pub struct LockGuard<'a, T> {
     lock: &'a Lock<T>,
 }
