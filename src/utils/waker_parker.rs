@@ -61,7 +61,7 @@ impl WakerState {
 
     #[cfg(not(target_atomic_u8))]
     fn encode(self) -> usize {
-        self.encode_inner()
+        self.encode_inner() as usize
     }
 
     #[inline]

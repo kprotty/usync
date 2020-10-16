@@ -183,7 +183,7 @@ impl<T> Lock<T> {
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return LockGuard::<'_, T>::new(self),
+                Ok(_) => return Some(LockGuard::<'_, T>::new(self)),
                 Err(e) => state = e,
             }
         }
@@ -264,7 +264,7 @@ impl<T> Lock<T> {
     pub unsafe fn unlock(&self) {
         // Unlock the Lock using a fetch_sub as opposed to a fetch_and.
         // The former can be done in a wait-free manner on x86 cpus using the `xadd` instruction.
-        let state = self.state.fetch_sub(LOCKED, Ordering::Release);
+        let state = self.state.fetch_sub(LOCKED as usize, Ordering::Release);
 
         // Go to the slow path to wake up a waiting LockWaiter
         // if there are any queued LockWaiters and
@@ -549,6 +549,10 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
                 Ordering::Relaxed,
             )
             .map(|_| LockGuard::new(lock))
+            .map_err(|_| {
+                P::yield_now(None);
+                lock.state.load(Ordering::Relaxed)
+            })
     }
 
     fn poll_lock(

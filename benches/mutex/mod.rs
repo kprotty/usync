@@ -332,11 +332,11 @@ struct BenchmarkResult {
 
 impl BenchmarkResult {
     fn lower(value: f64) -> String {
-        if value < 1_000f64 {
+        if value <= 1_000f64 {
             format!("{}", value.round())
-        } else if value < 1_000_000f64 {
+        } else if value <= 1_000_000f64 {
             format!("{}k", (value / 1_000f64).round())
-        } else if value < 1_000_000_000f64 {
+        } else if value <= 1_000_000_000f64 {
             format!("{:.2}m", value / 1_000_000f64)
         } else {
             format!("{:.2}b", value / 1_000_000_000f64)
