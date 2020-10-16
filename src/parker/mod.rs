@@ -107,17 +107,12 @@ pub type DefaultParker = SpinParker;
 
 /// Aliases a [`Parker`] that is available to the current target
 /// which communicates with the underlying OS for `Instant` and blocking/unblocking.
-#[cfg(all(feature = "std", not(feature = "os")))]
+#[cfg(feature = "std")]
 pub type SystemParker = StdParker;
 
 /// Aliases a [`Parker`] that is available to the current target
 /// which communicates with the underlying OS for `Instant` and blocking/unblocking.
 #[cfg(all(feature = "os", not(feature = "std")))]
-pub type SystemParker = OsParker;
-
-/// Aliases a [`Parker`] that is available to the current target
-/// which communicates with the underlying OS for `Instant` and blocking/unblocking.
-#[cfg(any(feature = "std", feature = "os"))]
 pub type SystemParker = OsParker;
 
 mod spin_parker;

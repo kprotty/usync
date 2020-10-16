@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::sync::UnsafeCell;
-use core::{cell::Cell, marker::PhantomPinned, pin::Pin, ptr::NonNull};
+use core::{cell::Cell, marker::PhantomPinned, ptr::NonNull};
 
 /// An intrusive, Doubly linked list Node with internal data.
 pub(crate) struct Node<T> {
@@ -44,9 +44,4 @@ impl<T> Node<T> {
     pub(crate) fn with_mut<F>(&self, f: impl FnOnce(*mut T) -> F) -> F {
         self.value.with_mut(f)
     }
-}
-
-/// A Doubly-linked lists of of [`Node`]s
-pub(crate) struct Queue<T> {
-    head: Option<NonNull<Node<T>>>,
 }

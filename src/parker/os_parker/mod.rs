@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::{parker::Parker, utils::sync::spin_loop_hint};
+use crate::{
+    parker::Parker,
+    utils::sync::{spin_loop_hint, AtomicInt, Int, Ordering},
+};
 use core::{
     convert::TryInto,
     fmt,
+    mem::MaybeUninit,
     ops::{Add, AddAssign, Sub, SubAssign},
     time::Duration,
 };
@@ -35,8 +39,15 @@ mod posix;
 #[cfg(all(unix, not(target_os = "linux")))]
 use posix as os;
 
+/// A [`Parker`] implementation which calls into the detected OS to implement timers and thread blocking/unblocking.
 pub struct OsParker {
     parker: os::Parker,
+}
+
+impl fmt::Debug for OsParker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.parker.fmt(f)
+    }
 }
 
 unsafe impl Parker for OsParker {
@@ -106,32 +117,30 @@ impl OsInstant {
     }
 
     fn nanotime() -> u64 {
-        let mut now = os::Clock::nanotime();
-        if os::Clock::IS_ACTUALLY_MONOTONIC {
+        let mut now = os::clock::nanotime(Self::frequency());
+        if os::clock::IS_ACTUALLY_MONOTONIC {
             return now;
         }
 
         #[cfg(target_pointer_width = "64")]
         {
-            use crate::utils::sync::{AtomicUsize, Ordering};
-
+            use crate::utils::sync::AtomicUsize;
             static LAST: AtomicUsize = AtomicUsize::new(0);
 
             let mut last = LAST.load(Ordering::Relaxed) as u64;
             loop {
                 if last >= now {
                     now = last;
-                    break;
-                }
-                match LAST.compare_exchange_weak(
+                } else if let Err(e) = LAST.compare_exchange_weak(
                     last as usize,
                     now as usize,
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => break,
-                    Err(e) => last = e as u64,
+                    last = e as u64;
+                    continue;
                 }
+                break;
             }
         }
 
@@ -139,6 +148,12 @@ impl OsInstant {
         {
             use crate::{parker::DefaultParker, sync::Lock};
 
+            #[cfg(feature = "loom")]
+            loom::lazy_static! {
+                static ref LAST: Lock<u64> = Lock::new(0);
+            }
+
+            #[cfg(not(feature = "loom"))]
             static LAST: Lock<u64> = Lock::new(0);
 
             let mut last = LAST.lock::<DefaultParker>();
@@ -150,6 +165,35 @@ impl OsInstant {
         }
 
         now
+    }
+
+    fn frequency() -> os::clock::Frequency {
+        const STATE_UNINIT: Int = 0;
+        const STATE_STORING: Int = 1;
+        const STATE_INIT: Int = 2;
+
+        static FREQUENCY_STATE: AtomicInt = AtomicInt::new(STATE_UNINIT);
+        static mut FREQUENCY: MaybeUninit<os::clock::Frequency> = MaybeUninit::uninit();
+
+        if FREQUENCY_STATE.load(Ordering::Acquire) == STATE_INIT {
+            return unsafe { FREQUENCY.assume_init() };
+        }
+
+        let frequency = os::clock::frequency();
+        if FREQUENCY_STATE
+            .compare_exchange(
+                STATE_UNINIT,
+                STATE_STORING,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            unsafe { FREQUENCY = MaybeUninit::new(frequency) };
+            FREQUENCY_STATE.store(STATE_INIT, Ordering::Release);
+        }
+
+        frequency
     }
 
     pub fn duration_since(&self, earlier: Self) -> Duration {

@@ -435,7 +435,7 @@ impl<T> Lock<T> {
             }
 
             // Try to dequeue the tail node
-            match tail.0.prev.get() {
+            match tail.0.prev.replace(None) {
                 // If there are more nodes than the tail in the queue,
                 // then update the head to point to the new tail, effectively dequeueing ours.
                 //

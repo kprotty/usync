@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use super::OsInstant as Instant;
-use crate::utils::sync::{AtomicBool, AtomicUsize, Ordering, FALSE, TRUE};
-use core::{convert::TryInto, mem, ptr};
+use crate::utils::sync::{AtomicInt, AtomicUsize, Int, Ordering};
+use core::{cell::Cell, convert::TryInto, fmt, mem, ptr};
 
 static WAIT_FN: AtomicUsize = AtomicUsize::new(0);
 static WAKE_FN: AtomicUsize = AtomicUsize::new(0);
@@ -29,17 +29,17 @@ type NtKeyedEventFn = extern "system" fn(
 #[cold]
 unsafe fn load_keyed_event_fns() {
     let ntdll = winapi::GetModuleHandleA(b"ntdll.dll\x00".as_ptr());
-    assert_ne!(ntdll.is_null(), false, "failed to load ntdll.dll");
+    assert_eq!(ntdll.is_null(), false, "failed to load ntdll.dll");
 
     let wait_fn = winapi::GetProcAddress(ntdll, b"NtWaitForKeyedEvent\x00".as_ptr());
-    assert_ne!(
+    assert_eq!(
         wait_fn.is_null(),
         false,
         "failed to load NtWaitForKeyedEvent"
     );
 
     let wake_fn = winapi::GetProcAddress(ntdll, b"NtReleaseKeyedEvent\x00".as_ptr());
-    assert_ne!(
+    assert_eq!(
         wake_fn.is_null(),
         false,
         "failed to load NtReleaseKeyedEvent"
@@ -49,9 +49,19 @@ unsafe fn load_keyed_event_fns() {
     WAKE_FN.store(wake_fn as usize, Ordering::Relaxed);
 }
 
+const EMPTY: Int = 0;
+const WAITING: Int = 1;
+const NOTIFIED: Int = 2;
+
 #[repr(align(4))]
 pub(crate) struct Parker {
-    is_parked: AtomicBool,
+    state: AtomicInt,
+}
+
+impl fmt::Debug for Parker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OsParker").finish()
+    }
 }
 
 impl Parker {
@@ -61,22 +71,49 @@ impl Parker {
 
     pub(crate) fn new() -> Self {
         Self {
-            is_parked: AtomicBool::new(FALSE),
+            state: AtomicInt::new(EMPTY),
         }
     }
 
-    pub(crate) fn prepare(&mut self) {
-        self.is_parked = AtomicBool::new(TRUE);
+    pub(crate) fn prepare(&mut self) {}
+
+    #[inline]
+    pub(crate) fn park(&self, deadline: Option<Instant>) -> bool {
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            match state {
+                EMPTY => match self.state.compare_exchange_weak(
+                    state,
+                    WAITING,
+                    Ordering::Acquire,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return self.wait(deadline),
+                    Err(e) => state = e,
+                },
+                WAITING => {
+                    unreachable!("multiple threads parking on the same OsParker");
+                }
+                NOTIFIED => {
+                    self.state.store(EMPTY, Ordering::Relaxed);
+                    return true;
+                }
+                _ => {
+                    unreachable!("invalid OsParker state {:?}", state);
+                }
+            }
+        }
     }
 
-    pub(crate) fn park(&self, deadline: Option<Instant>) -> bool {
-        let mut timeout: winapi::LARGE_INTEGER = 0;
+    #[cold]
+    fn wait(&self, deadline: Option<Instant>) -> bool {
+        let timeout = Cell::new(0);
         let mut timeout_ptr = ptr::null();
 
         if let Some(deadline) = deadline {
             let now = Instant::now();
-            timeout_ptr = &timeout;
-            timeout = if now > deadline {
+            timeout_ptr = timeout.as_ptr();
+            timeout.set(if now > deadline {
                 0
             } else {
                 let ns: winapi::LARGE_INTEGER = (deadline - now)
@@ -86,10 +123,11 @@ impl Parker {
                 // Windows works with units of 100ns.
                 // A negative value indicates a relative timeout.
                 -(ns / 100)
-            }
+            })
         }
 
         unsafe {
+            #[allow(non_snake_case)]
             let NtWaitForKeyedEvent: NtKeyedEventFn = {
                 let mut wait_fn = WAIT_FN.load(Ordering::Relaxed);
                 if wait_fn == 0 {
@@ -101,28 +139,25 @@ impl Parker {
 
             match NtWaitForKeyedEvent(
                 ptr::null(),
-                &self.is_parked as *const _ as winapi::PVOID,
+                &self.state as *const _ as winapi::PVOID,
                 winapi::FALSE,
                 timeout_ptr,
             ) {
                 winapi::STATUS_SUCCESS => {}
                 winapi::STATUS_TIMEOUT => {
-                    match self.is_parked.compare_exchange(
-                        TRUE,
-                        FALSE,
+                    match self.state.compare_exchange(
+                        WAITING,
+                        EMPTY,
                         Ordering::Acquire,
                         Ordering::Acquire,
                     ) {
                         Ok(_) => return false,
-                        Err(is_parked) => {
-                            debug_assert_eq!(
-                                is_parked, FALSE,
-                                "invalid is_parked value on timeout",
-                            );
+                        Err(state) => {
+                            debug_assert_eq!(state, EMPTY, "invalid OsParker state on timeout",);
                             assert_eq!(
                                 NtWaitForKeyedEvent(
                                     ptr::null(),
-                                    &self.is_parked as *const _ as winapi::PVOID,
+                                    &self.state as *const _ as winapi::PVOID,
                                     winapi::FALSE,
                                     ptr::null(),
                                 ),
@@ -137,14 +172,45 @@ impl Parker {
                 }
             }
 
-            debug_assert_eq!(self.is_parked.load(Ordering::Relaxed), FALSE);
             true
         }
     }
 
     pub(crate) unsafe fn unpark(&self) {
-        self.is_parked.store(FALSE, Ordering::Release);
+        let mut state = self.state.load(Ordering::Relaxed);
+        loop {
+            match state {
+                EMPTY => match self.state.compare_exchange_weak(
+                    state,
+                    NOTIFIED,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(e) => state = e,
+                },
+                WAITING => match self.state.compare_exchange_weak(
+                    state,
+                    EMPTY,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return self.notify(),
+                    Err(e) => state = e,
+                },
+                NOTIFIED => {
+                    unreachable!("OsParker unparked when already unparked");
+                }
+                _ => {
+                    unreachable!("invalid OsParker state {:?}", state);
+                }
+            }
+        }
+    }
 
+    #[cold]
+    unsafe fn notify(&self) {
+        #[allow(non_snake_case)]
         let NtReleaseKeyedEvent: NtKeyedEventFn = {
             let mut wake_fn = WAKE_FN.load(Ordering::Relaxed);
             if wake_fn == 0 {
@@ -157,7 +223,7 @@ impl Parker {
         assert_eq!(
             NtReleaseKeyedEvent(
                 ptr::null(),
-                &self.is_parked as *const _ as winapi::PVOID,
+                &self.state as *const _ as winapi::PVOID,
                 winapi::FALSE,
                 ptr::null(),
             ),
@@ -167,25 +233,60 @@ impl Parker {
     }
 }
 
+pub(crate) mod clock {
+    use super::winapi;
+    use core::{
+        mem::{transmute, MaybeUninit},
+        ops::Div,
+    };
+
+    pub(crate) type Frequency = u64;
+
+    #[cold]
+    pub(crate) fn frequency() -> Frequency {
+        unsafe {
+            let mut frequency = MaybeUninit::uninit();
+            let status = winapi::QueryPerformanceFrequency(frequency.as_mut_ptr());
+            debug_assert_eq!(status, winapi::TRUE);
+            transmute(frequency.assume_init())
+        }
+    }
+
+    pub(crate) const IS_ACTUALLY_MONOTONIC: bool = false;
+
+    pub(crate) fn nanotime(frequency: Frequency) -> u64 {
+        let counter: u64 = unsafe {
+            let mut counter = MaybeUninit::uninit();
+            let status = winapi::QueryPerformanceCounter(counter.as_mut_ptr());
+            debug_assert_eq!(status, winapi::TRUE);
+            transmute(counter.assume_init())
+        };
+
+        counter.wrapping_mul(1_000_000_000).div(frequency).div(100)
+    }
+}
+
 #[allow(non_camel_case_types)]
 mod winapi {
-    pub type DWORD = u32;
-    pub type NTSTATUS = DWORD;
-    pub type BOOLEAN = i32;
-    pub type PVOID = *const ();
-    pub type HANDLE = PVOID;
-    pub type HMODULE = HANDLE;
-    pub type LARGE_INTEGER = i64;
+    pub(crate) type DWORD = u32;
+    pub(crate) type NTSTATUS = DWORD;
+    pub(crate) type BOOLEAN = i32;
+    pub(crate) type PVOID = *const u8;
+    pub(crate) type HANDLE = PVOID;
+    pub(crate) type HMODULE = HANDLE;
+    pub(crate) type LARGE_INTEGER = i64;
 
-    pub const TRUE: BOOLEAN = 1;
-    pub const FALSE: BOOLEAN = 0;
-    pub const STATUS_SUCCESS: NTSTATUS = 0x00000000;
-    pub const STATUS_TIMEOUT: NTSTATUS = 0x00000102;
+    pub(crate) const TRUE: BOOLEAN = 1;
+    pub(crate) const FALSE: BOOLEAN = 0;
+    pub(crate) const STATUS_SUCCESS: NTSTATUS = 0x00000000;
+    pub(crate) const STATUS_TIMEOUT: NTSTATUS = 0x00000102;
 
     #[link(name = "kernel32")]
     extern "system" {
-        pub fn Sleep(dwMilliseconds: DWORD);
-        pub fn GetModuleHandleA(dll: *const u8) -> HMODULE;
-        pub fn GetProcAddress(dll: HMODULE, name: *const u8) -> HANDLE;
+        pub(crate) fn Sleep(dwMilliseconds: DWORD);
+        pub(crate) fn QueryPerformanceCounter(counter: *mut LARGE_INTEGER) -> BOOLEAN;
+        pub(crate) fn QueryPerformanceFrequency(frequency: *mut LARGE_INTEGER) -> BOOLEAN;
+        pub(crate) fn GetModuleHandleA(dll: *const u8) -> HMODULE;
+        pub(crate) fn GetProcAddress(dll: HMODULE, name: *const u8) -> HANDLE;
     }
 }
