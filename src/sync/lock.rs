@@ -151,47 +151,8 @@ impl<T> Lock<T> {
         unsafe { &*(&self.state as *const _ as *const _) }
     }
 
-    /// Try to acquire the Lock in a non-blocking manner
-    #[cfg(all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64")))]
-    #[inline(always)]
-    pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
-        let mut locked: bool;
-
-        // For x86 platforms, although it should support byte level atomic instructions,
-        // it can be better to use the atomic bit-test-and-set (`bts`) instruction instead.
-        //
-        // This is due to not requiring register setup like swap (`xchg`) does
-        // which can increase instruction cache pressure and has been seen to be
-        // a small but noticeable performance increase for many unconteded operations.
-        //
-        // Another advantage over swap (`xchg`) is that it need not invalidate the
-        // cache line if the bit is already set.
-        use core::mem::size_of;
-        assert!(
-            size_of::<AtomicUsize>() >= size_of::<u16>(),
-            "AtomicUsize cannot be used with `lock btsw`",
-        );
-        unsafe {
-            llvm_asm!(
-                "lock btsw $$0, $1"
-                : "={@ccnc}" (locked)
-                : "*m" (&self.state)
-                : "cc", "memory"
-            );
-        }
-
-        if locked {
-            Some(LockGuard::new(self))
-        } else {
-            None
-        }
-    }
-
     /// Try to acquire the Lock in a non-blocking manner.
-    #[cfg(all(
-        target_atomic_u8,
-        not(all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64")))
-    ))]
+    #[cfg(target_atomic_u8)]
     #[inline(always)]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
         // On platforms which support byte level atomics
@@ -208,10 +169,7 @@ impl<T> Lock<T> {
     }
 
     /// Try to acquire the Lock in a non-blocking manner.
-    #[cfg(not(all(
-        target_atomic_u8,
-        not(all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64")))
-    )))]
+    #[cfg(not(target_atomic_u8))]
     #[inline]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
         let mut state = self.state.load(Ordering::Relaxed);
@@ -232,10 +190,7 @@ impl<T> Lock<T> {
     }
 
     /// `lock*()` fast path - tries to acquire the lock assuming no contention.
-    #[cfg(any(
-        target_atomic_u8,
-        all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"))
-    ))]
+    #[cfg(target_atomic_u8)]
     #[inline(always)]
     fn lock_fast(&self) -> Option<LockGuard<'_, T>> {
         // For platforms which support byte-level atomics or use custom assembly,
@@ -244,10 +199,7 @@ impl<T> Lock<T> {
     }
 
     /// `lock*()` fast path - tries to acquire the lock assuming no contention.
-    #[cfg(not(any(
-        target_atomic_u8,
-        all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"))
-    )))]
+    #[cfg(not(target_atomic_u8))]
     #[inline(always)]
     fn lock_fast(&self) -> Option<LockGuard<'_, T>> {
         // For normal platforms, a compare exchange works well and is near the perf of spinlocks.
@@ -577,10 +529,7 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
         }
     }
 
-    #[cfg(any(
-        target_atomic_u8,
-        all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"))
-    ))]
+    #[cfg(target_atomic_u8)]
     #[inline(always)]
     fn lock_acquire(lock: &'a Lock<T>, _state: usize) -> Result<LockGuard<'a, T>, usize> {
         lock.try_lock().ok_or_else(|| {
@@ -589,10 +538,7 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
         })
     }
 
-    #[cfg(not(any(
-        target_atomic_u8,
-        all(feature = "nightly", any(target_arch = "x86", target_arch = "x86_64"))
-    )))]
+    #[cfg(not(target_atomic_u8))]
     #[inline(always)]
     fn lock_acquire(lock: &'a Lock<T>, state: usize) -> Result<LockGuard<'a, T>, usize> {
         lock.state

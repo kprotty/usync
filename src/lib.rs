@@ -20,7 +20,7 @@
 //! resources like memory.
 
 #![cfg_attr(not(any(test, feature = "std", feature = "loom")), no_std)]
-#![cfg_attr(feature = "nightly", feature(doc_cfg, llvm_asm))]
+#![cfg_attr(feature = "nightly", feature(doc_cfg))]
 #![warn(
     missing_docs,
     rust_2018_idioms,
