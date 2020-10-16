@@ -376,7 +376,7 @@ impl fmt::Debug for BenchmarkResult {
     }
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 struct Benchmarker {
     measure: Duration,
     threads: usize,
@@ -481,7 +481,7 @@ pub fn main() {
         for &locked in locked.iter() {
             for &threads in threads.iter() {
                 for &measure in measure.iter() {
-                    let mut b = Benchmarker {
+                    let b = Benchmarker {
                         measure: measure,
                         threads: threads,
                         locked: locked.scaled(ns_per_work),
@@ -498,7 +498,11 @@ pub fn main() {
                         BenchmarkResult::default(),
                     );
 
-                    bench_all(&mut b);
+                    loom::model(move || {
+                        let mut b = b;
+                        bench_all(&mut b);
+                    });
+
                     println!();
                 }
             }

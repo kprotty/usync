@@ -13,8 +13,13 @@
 // limitations under the License.
 
 use super::OsInstant as Instant;
-use crate::utils::sync::{AtomicInt, AtomicUsize, Int, Ordering};
+use crate::utils::sync::{AtomicInt, Int, Ordering};
 use core::{cell::Cell, convert::TryInto, fmt, mem, ptr};
+
+#[cfg(feature = "loom")]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicUsizeOrdering};
+#[cfg(not(feature = "loom"))]
+use crate::utils::sync::{AtomicUsize, Ordering as AtomicUsizeOrdering};
 
 static WAIT_FN: AtomicUsize = AtomicUsize::new(0);
 static WAKE_FN: AtomicUsize = AtomicUsize::new(0);
@@ -45,8 +50,8 @@ unsafe fn load_keyed_event_fns() {
         "failed to load NtReleaseKeyedEvent"
     );
 
-    WAIT_FN.store(wait_fn as usize, Ordering::Relaxed);
-    WAKE_FN.store(wake_fn as usize, Ordering::Relaxed);
+    WAIT_FN.store(wait_fn as usize, AtomicUsizeOrdering::Relaxed);
+    WAKE_FN.store(wake_fn as usize, AtomicUsizeOrdering::Relaxed);
 }
 
 const EMPTY: Int = 0;
@@ -129,10 +134,10 @@ impl Parker {
         unsafe {
             #[allow(non_snake_case)]
             let NtWaitForKeyedEvent: NtKeyedEventFn = {
-                let mut wait_fn = WAIT_FN.load(Ordering::Relaxed);
+                let mut wait_fn = WAIT_FN.load(AtomicUsizeOrdering::Relaxed);
                 if wait_fn == 0 {
                     load_keyed_event_fns();
-                    wait_fn = WAIT_FN.load(Ordering::Relaxed);
+                    wait_fn = WAIT_FN.load(AtomicUsizeOrdering::Relaxed);
                 }
                 mem::transmute(wait_fn)
             };
@@ -212,10 +217,10 @@ impl Parker {
     unsafe fn notify(&self) {
         #[allow(non_snake_case)]
         let NtReleaseKeyedEvent: NtKeyedEventFn = {
-            let mut wake_fn = WAKE_FN.load(Ordering::Relaxed);
+            let mut wake_fn = WAKE_FN.load(AtomicUsizeOrdering::Relaxed);
             if wake_fn == 0 {
                 load_keyed_event_fns();
-                wake_fn = WAKE_FN.load(Ordering::Relaxed);
+                wake_fn = WAKE_FN.load(AtomicUsizeOrdering::Relaxed);
             }
             mem::transmute(wake_fn)
         };

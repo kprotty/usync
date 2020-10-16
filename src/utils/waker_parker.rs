@@ -95,10 +95,20 @@ impl WakerParker {
             .with_mut(|waker_ptr| unsafe { (&*waker_ptr).as_ref().is_some() });
 
         if !is_waiting {
-            *self = Self {
-                state: AtomicU8::new(WakerState::Waiting.encode()),
-                waker: UnsafeCell::new(Some(ctx.waker().clone())),
-            };
+            #[cfg(feature = "loom")]
+            {
+                self.state.store(WakerState::Waiting.encode(), Ordering::Relaxed);
+                self.waker.with_mut(|waker_ptr| unsafe {
+                    *waker_ptr = Some(ctx.waker().clone());
+                });
+            }
+            #[cfg(not(feature = "loom"))]
+            {
+                *self = Self {
+                    state: AtomicU8::new(WakerState::Waiting.encode()),
+                    waker: UnsafeCell::new(Some(ctx.waker().clone())),
+                };
+            }
         }
     }
 
@@ -138,12 +148,14 @@ impl WakerParker {
                 }
             });
 
-            match self.state.compare_exchange(
+            let x = self.state.compare_exchange(
                 WakerState::Updating.encode(),
                 WakerState::Waiting.encode(),
                 Ordering::Release,
                 Ordering::Relaxed,
-            ) {
+            );
+
+            match x {
                 Ok(_) => return Poll::Pending,
                 Err(e) => state = e,
             }

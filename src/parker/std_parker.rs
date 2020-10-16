@@ -77,8 +77,19 @@ unsafe impl Parker for StdParker {
         }
     }
 
+    #[cfg(feature = "loom")]
     fn prepare(&mut self) {
-        if *self.is_parked.get_mut() == FALSE {
+        let is_parked = unsafe { self.is_parked.unsync_load() };
+        if is_parked == FALSE {
+            self.is_parked.store(TRUE, Ordering::Relaxed);
+            self.thread.set(Some(thread::current()));
+        }
+    }
+
+    #[cfg(not(feature = "loom"))]
+    fn prepare(&mut self) {
+        let is_parked = *self.is_parked.get_mut();
+        if is_parked == FALSE {
             *self = Self {
                 is_parked: AtomicBool::new(TRUE),
                 thread: Cell::new(Some(thread::current())),

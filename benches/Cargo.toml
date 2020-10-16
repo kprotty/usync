@@ -7,6 +7,7 @@ license = "Apache-2.0"
 authors = ["kprotty"]
 
 [dependencies]
+loom = "0.3"
 parking_lot = "0.11"
 simple-mutex = "1.1"
 usync = { path = "../" }
