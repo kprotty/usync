@@ -18,17 +18,19 @@ use std::{cell::Cell, fmt, thread, time::Instant};
 
 /// A [`Parker`] implementation powered by `std::{thread, time::Instant}`
 pub struct StdParker {
-    is_notified: AtomicBool,
+    is_parked: AtomicBool,
     thread: Cell<Option<thread::Thread>>,
 }
 
+unsafe impl Sync for StdParker {}
+
 impl fmt::Debug for StdParker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let is_notified = self.is_notified.load(Ordering::Relaxed);
-        let is_notified = is_notified == TRUE;
+        let is_parked = self.is_parked.load(Ordering::Relaxed);
+        let is_parked = is_parked == TRUE;
 
         f.debug_struct("StdParker")
-            .field("unparked", &is_notified)
+            .field("is_parked", &is_parked)
             .finish()
     }
 }
@@ -70,33 +72,29 @@ unsafe impl Parker for StdParker {
 
     fn new() -> Self {
         Self {
-            is_notified: AtomicBool::new(FALSE),
+            is_parked: AtomicBool::new(FALSE),
             thread: Cell::new(None),
         }
     }
 
-    fn prepare(&self) {
-        // Safety: we should effectively have a &mut self atm
-        let is_prepared = unsafe {
-            let thread = &*self.thread.as_ptr();
-            thread.is_some()
-        };
-
-        if !is_prepared {
-            self.thread.set(Some(thread::current()));
-            self.is_notified.store(FALSE, Ordering::Relaxed);
+    fn prepare(&mut self) {
+        if *self.is_parked.get_mut() == FALSE {
+            *self = Self {
+                is_parked: AtomicBool::new(TRUE),
+                thread: Cell::new(Some(thread::current())),
+            };
         }
     }
 
     fn park(&self) {
-        while self.is_notified.load(Ordering::Acquire) == FALSE {
+        while self.is_parked.load(Ordering::Acquire) == TRUE {
             thread::park();
         }
     }
 
     fn park_until(&self, deadline: Self::Instant) -> bool {
         loop {
-            if self.is_notified.load(Ordering::Acquire) != FALSE {
+            if self.is_parked.load(Ordering::Acquire) == FALSE {
                 return true;
             }
 
@@ -109,9 +107,10 @@ unsafe impl Parker for StdParker {
         }
     }
 
-    fn unpark(&self) {
+    unsafe fn unpark(&self) {
         let thread = self.thread.take();
-        self.is_notified.store(TRUE, Ordering::Release);
+        self.is_parked.store(FALSE, Ordering::Release);
+
         thread
             .expect("StdParker unparked when not prepared")
             .unpark()

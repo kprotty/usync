@@ -28,7 +28,7 @@ use core::{ops::Add, time::Duration};
 /// [prepare]: Parker::prepare
 /// [park]: Parker::park
 /// [unpark]: Parker::unpark
-pub unsafe trait Parker {
+pub unsafe trait Parker: Sync {
     /// Value type which represents a specific point in time for the Parker platform.
     type Instant: Copy + PartialOrd + Add<Duration, Output = Self::Instant>;
 
@@ -60,7 +60,7 @@ pub unsafe trait Parker {
     ///
     /// [park]: Parker::park
     /// [park_until]: Parker::park_until
-    fn prepare(&self);
+    fn prepare(&mut self);
 
     /// Pause execution of the calling thread until another thread invokes [unpark].
     /// [prepare] must be called before hand.
@@ -82,12 +82,17 @@ pub unsafe trait Parker {
     /// only that it schedules it to eventually continue execution.
     ///
     /// [prepare] must be called before-hand and after a successfull call to `unpark`,
-    /// [prepare] must be called again in if the thread wishes to pause execution again
+    /// [prepare] must be called again in if the thread wishes to pause execution again.
+    ///
+    /// # Safety
+    ///
+    /// Although the type is `Sync` and `unpark` is called from a shared reference, it must not be called by multiple threads.
+    /// Only one thread is allowed to unpark() a parked `Parker` at a given moment in time.
     ///
     /// [prepare]: Parker::prepare
     /// [park]: Parker::park
     /// [park_until]: Parker::park_until
-    fn unpark(&self);
+    unsafe fn unpark(&self);
 }
 
 /// Aliases some [`Parker`] that is available to the current target.

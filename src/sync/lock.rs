@@ -45,37 +45,9 @@ const WAITING: usize = !3;
 #[cfg(target_atomic_u8)]
 const WAITING: usize = !511;
 
-#[cfg_attr(not(target_atomic_u8), repr(align(4)))]
-#[cfg_attr(target_atomic_u8, repr(align(512)))]
-struct LockWaiter {
-    node: WaiterNode<()>,
-    waker_parker: WakerParker,
-}
-
-impl LockWaiter {
-    /// Create an empty LockWaiter
-    fn new() -> Self {
-        Self {
-            node: WaiterNode::new(()),
-            waker_parker: WakerParker::new(),
-        }
-    }
-
-    /// Get the parent LockWaiter reference from its `node` field reference.
-    ///
-    /// Safety: caller must ensure that the node reference actually lives inside a LockWaiter.
-    unsafe fn from_node(node: &WaiterNode<()>) -> &Self {
-        let stub = Self::new();
-
-        let base_ptr = &stub as *const _ as usize;
-        let field_ptr = &stub.node as *const _ as usize;
-        let field_offset = field_ptr - base_ptr;
-
-        let node_ptr = node as *const _ as usize;
-        let self_ptr = node_ptr - field_offset;
-        &*(self_ptr as *const Self)
-    }
-}
+#[cfg_attr(not(target_atomic_u8), repr(C, align(4)))]
+#[cfg_attr(target_atomic_u8, repr(C, align(512)))]
+struct LockWaiter(WaiterNode<WakerParker>);
 
 /// A mutual exclusioin primitive useful for protecting shared data.
 ///
@@ -421,20 +393,26 @@ impl<T> Lock<T> {
             let (head, tail) = unsafe {
                 let head = NonNull::new((state & WAITING) as *mut LockWaiter);
                 let head = head.expect("Lock::unlock_slow() without any LockWaiters");
-                let tail = head.as_ref().node.tail.get().unwrap_or_else(|| {
-                    let mut current = NonNull::from(&head.as_ref().node);
+                let head = NonNull::from(&head.as_ref().0);
+
+                let tail = head.as_ref().tail.get().unwrap_or_else(|| {
+                    let mut current = head;
                     loop {
                         let next = current.as_ref().next.get();
                         let next = next.expect("Lock::unlock_slow() invalid link");
                         next.as_ref().prev.set(Some(current));
                         current = next;
                         if let Some(tail) = current.as_ref().tail.get() {
-                            head.as_ref().node.tail.set(Some(tail));
+                            head.as_ref().tail.set(Some(tail));
                             break tail;
                         }
                     }
                 });
-                (&*head.as_ptr(), LockWaiter::from_node(&*tail.as_ptr()))
+
+                (
+                    &*head.cast::<LockWaiter>().as_ptr(),
+                    &*tail.cast::<LockWaiter>().as_ptr(),
+                )
             };
 
             // If the `Lock` is currently owned by another thread,
@@ -457,13 +435,13 @@ impl<T> Lock<T> {
             }
 
             // Try to dequeue the tail node
-            match tail.node.prev.get() {
+            match tail.0.prev.get() {
                 // If there are more nodes than the tail in the queue,
                 // then update the head to point to the new tail, effectively dequeueing ours.
                 //
                 // Release ordering to synchronize the head write as explained in the `dequeue loop commment.
                 Some(new_tail) => {
-                    head.node.tail.set(Some(new_tail));
+                    head.0.tail.set(Some(new_tail));
                     fence(Ordering::Release);
                 }
                 // If the queue will be empty after dequeueing the tail node,
@@ -493,9 +471,13 @@ impl<T> Lock<T> {
 
             // We successfully dequeued the tail node from the wait queue.
             // Wake up its waiter which will try to acquire the lock again.
-            if let Some(waker) = tail.waker_parker.unpark(0) {
-                waker.wake();
-            }
+            tail.0.with(|waker_parker_ptr| unsafe {
+                let waker_parker = &*waker_parker_ptr;
+                if let Some(waker) = waker_parker.unpark(0) {
+                    waker.wake();
+                }
+            });
+
             return;
         }
     }
@@ -590,7 +572,7 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
     fn new(state: LockFutureState<'a, T>) -> Self {
         Self {
             state,
-            waiter: LockWaiter::new(),
+            waiter: LockWaiter(WaiterNode::new(WakerParker::new())),
             _parker: PhantomData,
         }
     }
@@ -652,22 +634,17 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
             }
 
             unsafe {
-                waiter.waker_parker.prepare(ctx);
-                waiter.node.prev.set(None);
-                waiter.node.tail.set(match head {
-                    Some(_) => None,
-                    None => Some(NonNull::from(&waiter.node)),
+                waiter.0.with_mut(|waker_parker_ptr| {
+                    (&mut *waker_parker_ptr).prepare(ctx);
                 });
-                waiter.node.next.set(head.and_then(|head_ptr| {
-                    let node_offset = {
-                        let field_ptr = &waiter.node as *const _ as usize;
-                        let base_ptr = waiter as *const _ as usize;
-                        field_ptr - base_ptr
-                    };
-                    let head_ptr = head_ptr.as_ptr() as usize;
-                    let node_ptr = head_ptr + node_offset;
-                    NonNull::new(node_ptr as *mut WaiterNode<()>)
-                }));
+                waiter
+                    .0
+                    .next
+                    .set(head.map(|head_ptr| head_ptr.cast::<WaiterNode<WakerParker>>()));
+                waiter.0.tail.set(match head {
+                    Some(_) => None,
+                    None => Some(NonNull::from(&waiter.0)),
+                });
             }
 
             match lock.state.compare_exchange_weak(
@@ -683,10 +660,13 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
     }
 
     fn poll_wait(ctx: &Context<'_>, waiter: &LockWaiter) -> Poll<()> {
-        match waiter.waker_parker.park(ctx) {
-            Poll::Ready(_) => Poll::Ready(()),
-            Poll::Pending => Poll::Pending,
-        }
+        waiter.0.with(|waker_parker_ptr| unsafe {
+            match (&*waker_parker_ptr).park(ctx) {
+                Poll::Ready(0) => Poll::Ready(()),
+                Poll::Ready(t) => unreachable!("invalid waker notification token {}", t),
+                Poll::Pending => Poll::Pending,
+            }
+        })
     }
 }
 

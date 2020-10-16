@@ -18,16 +18,16 @@ use core::{fmt, ops::Add, time::Duration};
 
 /// A [`Parker`] implementation which spins to simulate blocking and uses a no-op `Instant`.
 pub struct SpinParker {
-    is_notified: AtomicBool,
+    is_parked: AtomicBool,
 }
 
 impl fmt::Debug for SpinParker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let is_notified = self.is_notified.load(Ordering::Relaxed);
-        let is_notified = is_notified == TRUE;
+        let is_parked = self.is_parked.load(Ordering::Relaxed);
+        let is_parked = is_parked == TRUE;
 
         f.debug_struct("SpinParker")
-            .field("unparked", &is_notified)
+            .field("is_parked", &is_parked)
             .finish()
     }
 }
@@ -52,16 +52,16 @@ unsafe impl Parker for SpinParker {
 
     fn new() -> Self {
         Self {
-            is_notified: AtomicBool::new(FALSE),
+            is_parked: AtomicBool::new(FALSE),
         }
     }
 
-    fn prepare(&self) {
-        self.is_notified.store(FALSE, Ordering::Relaxed);
+    fn prepare(&mut self) {
+        self.is_parked = AtomicBool::new(TRUE);
     }
 
     fn park(&self) {
-        while self.is_notified.load(Ordering::Acquire) == FALSE {
+        while self.is_parked.load(Ordering::Acquire) == TRUE {
             spin_loop_hint();
         }
     }
@@ -71,8 +71,8 @@ unsafe impl Parker for SpinParker {
         true
     }
 
-    fn unpark(&self) {
-        self.is_notified.store(TRUE, Ordering::Release);
+    unsafe fn unpark(&self) {
+        self.is_parked.store(FALSE, Ordering::Release);
     }
 }
 

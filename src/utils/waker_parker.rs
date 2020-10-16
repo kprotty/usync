@@ -88,14 +88,18 @@ impl WakerParker {
         }
     }
 
-    pub(crate) unsafe fn prepare(&self, ctx: &Context<'_>) {
-        self.waker.with_mut(|waker_ptr| {
-            if (&*waker_ptr).is_none() {
-                *waker_ptr = Some(ctx.waker().clone());
-                self.state
-                    .store(WakerState::Waiting.encode(), Ordering::Release);
-            }
-        });
+    pub(crate) fn prepare(&mut self, ctx: &Context<'_>) {
+        // Safety: we own the self.waker from `&mut self`
+        let is_waiting = self
+            .waker
+            .with_mut(|waker_ptr| unsafe { (&*waker_ptr).as_ref().is_some() });
+
+        if !is_waiting {
+            *self = Self {
+                state: AtomicU8::new(WakerState::Waiting.encode()),
+                waker: UnsafeCell::new(Some(ctx.waker().clone())),
+            };
+        }
     }
 
     pub(crate) fn park(&self, ctx: &Context<'_>) -> Poll<u8> {
@@ -202,8 +206,10 @@ impl WakerParker {
 
     /// Create a Waker from a Parker refernece
     ///
-    /// Safety: the caller must ensure that all Wakers
-    /// creted for the Parker don't outlive it via `Waker::clone()`s
+    /// # Safety:
+    ///
+    /// The caller must ensure that the Waker created, and the one cloned, both live as long as the parker reference.
+    /// The caller must also ensure that clone() is only called by the thread the Parker belongs to.
     pub(crate) unsafe fn of<P: Parker>(parker: &P) -> Waker {
         use core::marker::PhantomData;
         struct ParkerVTable<P>(PhantomData<*mut P>);
@@ -211,7 +217,7 @@ impl WakerParker {
         impl<P: Parker> ParkerVTable<P> {
             const VTABLE: RawWakerVTable = RawWakerVTable::new(
                 |parker_ptr| unsafe {
-                    (&*(parker_ptr as *const P)).prepare();
+                    (&mut *(parker_ptr as *mut P)).prepare();
                     RawWaker::new(parker_ptr, &Self::VTABLE)
                 },
                 |parker_ptr| unsafe {
