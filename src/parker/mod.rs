@@ -113,7 +113,7 @@ pub type SystemParker = OsParker;
 /// Aliases a [`Parker`] that is available to the current target
 /// which communicates with the underlying OS for `Instant` and blocking/unblocking.
 #[cfg(any(feature = "std", feature = "os"))]
-pub type SystemParker = StdParker; // OsParker;
+pub type SystemParker = OsParker;
 
 mod spin_parker;
 pub use spin_parker::SpinParker;
@@ -123,7 +123,7 @@ mod std_parker;
 #[cfg(feature = "std")]
 pub use std_parker::StdParker;
 
-// #[cfg(feature = "os")]
-// mod os_parker;
-// #[cfg(feature = "os")]
-// pub use os_parker::OsParker;
+#[cfg(feature = "os")]
+mod os_parker;
+#[cfg(feature = "os")]
+pub use os_parker::OsParker;
