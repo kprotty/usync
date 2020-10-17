@@ -16,10 +16,10 @@ use super::OsInstant as Instant;
 use crate::utils::sync::{AtomicInt, Int, Ordering};
 use core::{cell::Cell, convert::TryInto, fmt, mem, ptr};
 
-#[cfg(feature = "loom")]
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicUsizeOrdering};
 #[cfg(not(feature = "loom"))]
 use crate::utils::sync::{AtomicUsize, Ordering as AtomicUsizeOrdering};
+#[cfg(feature = "loom")]
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicUsizeOrdering};
 
 static WAIT_FN: AtomicUsize = AtomicUsize::new(0);
 static WAKE_FN: AtomicUsize = AtomicUsize::new(0);

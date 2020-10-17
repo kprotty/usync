@@ -97,7 +97,8 @@ impl WakerParker {
         if !is_waiting {
             #[cfg(feature = "loom")]
             {
-                self.state.store(WakerState::Waiting.encode(), Ordering::Relaxed);
+                self.state
+                    .store(WakerState::Waiting.encode(), Ordering::Relaxed);
                 self.waker.with_mut(|waker_ptr| unsafe {
                     *waker_ptr = Some(ctx.waker().clone());
                 });

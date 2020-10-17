@@ -157,7 +157,7 @@ impl OsInstant {
 
             #[cfg(feature = "loom")]
             let mut last = LAST.lock().unwrap();
-                
+
             #[cfg(not(feature = "loom"))]
             let mut last = LAST.lock::<crate::parker::DefaultParker>();
 

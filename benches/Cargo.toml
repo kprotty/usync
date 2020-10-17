@@ -6,8 +6,12 @@ publish = false
 license = "Apache-2.0"
 authors = ["kprotty"]
 
+[features]
+default = []
+loom = ["libloom", "usync/loom"]
+
 [dependencies]
-loom = "0.3"
+libloom = { version = "0.3", optional = true, package = "loom" }
 parking_lot = "0.11"
 simple-mutex = "1.1"
 usync = { path = "../" }

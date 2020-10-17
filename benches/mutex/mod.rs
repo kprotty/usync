@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "loom")]
+extern crate libloom as loom;
+
 use std::{
     convert::TryInto,
     fmt,
     ops::Div,
-    sync::{
-        atomic::{spin_loop_hint, AtomicBool, Ordering},
-        Arc, Barrier,
-    },
+    sync::{atomic::spin_loop_hint, Arc},
     time::{Duration, Instant},
 };
 
@@ -33,14 +33,14 @@ mod plot_lock;
 mod simple_mutex_lock;
 mod spin_lock;
 mod sym_lock;
+mod usync_lock;
 mod word_lock;
 mod word_lock_fair;
 mod word_lock_waking;
-mod usync_lock;
 
-fn bench_all(b: &mut Benchmarker) {
+fn bench_all(b: &Benchmarker) {
     // b.bench::<spin_lock::Lock>();
-    
+
     b.bench::<usync_lock::Lock>();
     b.bench::<word_lock_waking::Lock>();
 
@@ -52,7 +52,6 @@ fn bench_all(b: &mut Benchmarker) {
     // b.bench::<plot_lock::Lock>();
     // b.bench::<word_lock::Lock>();
     // b.bench::<word_lock_fair::Lock>();
-    
 
     // b.bench::<keyed_lock::Lock>();
 
@@ -385,7 +384,51 @@ struct Benchmarker {
 }
 
 impl Benchmarker {
+    #[cfg(feature = "loom")]
     fn bench<L: Lock>(&self) {
+        let this = *self;
+        if this.measure.as_nanos() != 0 {
+            return;
+        }
+
+        print!("{}: ", L::NAME);
+        loom::model(move || {
+            let iter_count = 10_000;
+            let lock = Arc::new(L::new());
+
+            (0..this.threads)
+                .map(|_| {
+                    let lock = lock.clone();
+                    loom::thread::spawn(move || {
+                        let mut iterations = 0;
+                        let mut prng = (&iterations as *const _ as usize).wrapping_mul(31) as u64;
+
+                        while iterations < iter_count {
+                            let unlocked = this.unlocked.count(&mut prng);
+                            let locked = this.locked.count(&mut prng);
+
+                            lock.with(|| (0..locked).for_each(|_| WorkUnit::work()));
+                            iterations += 1;
+                            (0..unlocked).for_each(|_| WorkUnit::work());
+                        }
+
+                        iterations
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|t| t.join().expect("failed to join OS thread"))
+                .for_each(|iter| assert_eq!(iter, iter_count));
+        });
+    }
+
+    #[cfg(not(feature = "loom"))]
+    fn bench<L: Lock>(&self) {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Barrier,
+        };
+
         #[repr(align(512))]
         struct CacheAlign<T>(T);
         struct Context<L> {
@@ -498,11 +541,7 @@ pub fn main() {
                         BenchmarkResult::default(),
                     );
 
-                    loom::model(move || {
-                        let mut b = b;
-                        bench_all(&mut b);
-                    });
-
+                    bench_all(&b);
                     println!();
                 }
             }

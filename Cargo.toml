@@ -20,7 +20,7 @@ keywords = [
 [features]
 default = ["std"]
 nightly = []
-std = ["os"]
+std = []
 os = []
 
 [dependencies.loom]

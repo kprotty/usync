@@ -36,6 +36,7 @@ const UNLOCKED: usize = 0;
 const LOCKED: usize = 1;
 const PARKED: usize = 2;
 
+// type InnerLock = super::usync_lock::Lock;
 type InnerLock = super::word_lock_waking::Lock;
 
 pub struct Lock {
