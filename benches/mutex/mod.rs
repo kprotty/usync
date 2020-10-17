@@ -154,14 +154,15 @@ impl ArgParser {
         while input.len() > 0 {
             let first = Self::parse_value(&mut input);
             let mut second = None;
-            if let Some(b'-') = input.next() {
+            if let Some(b'-') = input.peek().map(|c| *c) {
+                let _ = input.next();
                 second = Some(Self::parse_value(&mut input));
             }
             resolve(&mut results, first, second);
             match input.next() {
                 None => break,
                 Some(b',') => continue,
-                _ => Self::error("invalid continuation"),
+                Some(c) => Self::error(format!("invalid continuation: \"{}\"", *c as char).as_str()),
             }
         }
 
