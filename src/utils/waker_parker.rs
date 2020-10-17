@@ -90,26 +90,13 @@ impl WakerParker {
 
     pub(crate) fn prepare(&mut self, ctx: &Context<'_>) {
         // Safety: we own the self.waker from `&mut self`
-        let is_waiting = self
-            .waker
-            .with_mut(|waker_ptr| unsafe { (&*waker_ptr).as_ref().is_some() });
+        let waker_mut = self.waker.with_mut(|waker_ptr| unsafe {
+            &mut *waker_ptr
+        });
 
-        if !is_waiting {
-            #[cfg(feature = "loom")]
-            {
-                self.state
-                    .store(WakerState::Waiting.encode(), Ordering::Relaxed);
-                self.waker.with_mut(|waker_ptr| unsafe {
-                    *waker_ptr = Some(ctx.waker().clone());
-                });
-            }
-            #[cfg(not(feature = "loom"))]
-            {
-                *self = Self {
-                    state: AtomicU8::new(WakerState::Waiting.encode()),
-                    waker: UnsafeCell::new(Some(ctx.waker().clone())),
-                };
-            }
+        if waker_mut.is_none() {
+            *waker_mut = Some(ctx.waker().clone());
+            *self.state.get_mut() = WakerState::Waiting.encode();
         }
     }
 

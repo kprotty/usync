@@ -14,7 +14,7 @@
 
 use crate::{
     parker::Parker,
-    utils::sync::{spin_loop_hint, Ordering},
+    utils::sync::{Int, AtomicInt, spin_loop_hint, Ordering},
 };
 use core::{
     convert::TryInto,
@@ -124,11 +124,9 @@ impl OsInstant {
 
         #[cfg(target_pointer_width = "64")]
         {
-            #[cfg(feature = "loom")]
-            static LAST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            use crate::utils::sync::AtomicUsize;
 
-            #[cfg(not(feature = "loom"))]
-            static LAST: crate::utils::sync::AtomicUsize = crate::utils::sync::AtomicUsize::new(0);
+            static LAST: AtomicUsize = AtomicUsize::new(0);
 
             let mut last = LAST.load(Ordering::Relaxed) as u64;
             loop {
@@ -149,18 +147,11 @@ impl OsInstant {
 
         #[cfg(not(target_pointer_width = "64"))]
         {
-            #[cfg(feature = "loom")]
-            static LAST: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+            use crate::{parker::DefaultParker, sync::Lock};
 
-            #[cfg(not(feature = "loom"))]
-            static LAST: crate::sync::Lock<u64> = crate::sync::Lock::new(0);
+            static LAST: Lock<u64> = Lock::new(0);
 
-            #[cfg(feature = "loom")]
-            let mut last = LAST.lock().unwrap();
-
-            #[cfg(not(feature = "loom"))]
-            let mut last = LAST.lock::<crate::parker::DefaultParker>();
-
+            let mut last = LAST.lock::<DefaultParker>();
             if *last >= now {
                 now = *last;
             } else {
@@ -172,16 +163,6 @@ impl OsInstant {
     }
 
     fn frequency() -> os::clock::Frequency {
-        #[cfg(feature = "loom")]
-        type Int = u8;
-        #[cfg(not(feature = "loom"))]
-        type Int = crate::utils::sync::Int;
-
-        #[cfg(feature = "loom")]
-        type AtomicInt = std::sync::atomic::AtomicU8;
-        #[cfg(not(feature = "loom"))]
-        type AtomicInt = crate::utils::sync::AtomicInt;
-
         const STATE_UNINIT: Int = 0;
         const STATE_STORING: Int = 1;
         const STATE_INIT: Int = 2;

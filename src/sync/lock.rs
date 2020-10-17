@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(all(target_atomic_u8, not(feature = "loom")))]
+#[cfg(target_atomic_u8)]
 use crate::utils::sync::AtomicU8;
 use crate::{
     parker::Parker,
@@ -103,17 +103,6 @@ impl<T: fmt::Debug> fmt::Debug for Lock<T> {
 
 impl<T> Lock<T> {
     /// Create a new Lock in an unlocked state.
-    #[cfg(feature = "loom")]
-    // loom's UnsafeCell doesn't support const fn
-    pub fn new(value: T) -> Self {
-        Self {
-            state: AtomicUsize::new(UNLOCKED as usize),
-            value: UnsafeCell::new(value),
-        }
-    }
-
-    /// Create a new Lock in an unlocked state.
-    #[cfg(not(feature = "loom"))]
     pub const fn new(value: T) -> Self {
         Self {
             state: AtomicUsize::new(UNLOCKED as usize),
@@ -122,8 +111,6 @@ impl<T> Lock<T> {
     }
 
     /// Consumes the mutex and returns the underlying value.
-    #[cfg(not(feature = "loom"))]
-    // loom's UnsafeCell doesn't appear to have `into_inner`
     pub fn into_inner(self) -> T {
         self.value.into_inner()
     }
@@ -137,7 +124,7 @@ impl<T> Lock<T> {
 
     /// For platforms which support byte-level atomics,
     /// get a reference to the state as an AtomicU8 as opposed to an AtomicUsize.
-    #[cfg(all(target_atomic_u8, not(feature = "loom")))]
+    #[cfg(target_atomic_u8)]
     fn byte_state(&self) -> &AtomicU8 {
         use core::mem::size_of;
         assert!(
@@ -152,7 +139,7 @@ impl<T> Lock<T> {
     }
 
     /// Try to acquire the Lock in a non-blocking manner.
-    #[cfg(all(target_atomic_u8, not(feature = "loom")))]
+    #[cfg(target_atomic_u8)]
     #[inline(always)]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
         // On platforms which support byte level atomics
@@ -169,7 +156,7 @@ impl<T> Lock<T> {
     }
 
     /// Try to acquire the Lock in a non-blocking manner.
-    #[cfg(not(all(target_atomic_u8, not(feature = "loom"))))]
+    #[cfg(not(target_atomic_u8))]
     #[inline]
     pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
         let mut state = self.state.load(Ordering::Relaxed);
@@ -190,7 +177,7 @@ impl<T> Lock<T> {
     }
 
     /// `lock*()` fast path - tries to acquire the lock assuming no contention.
-    #[cfg(all(target_atomic_u8, not(feature = "loom")))]
+    #[cfg(target_atomic_u8)]
     #[inline(always)]
     fn lock_fast(&self) -> Option<LockGuard<'_, T>> {
         // For platforms which support byte-level atomics or use custom assembly,
@@ -199,7 +186,7 @@ impl<T> Lock<T> {
     }
 
     /// `lock*()` fast path - tries to acquire the lock assuming no contention.
-    #[cfg(not(all(target_atomic_u8, not(feature = "loom"))))]
+    #[cfg(not(target_atomic_u8))]
     #[inline(always)]
     fn lock_fast(&self) -> Option<LockGuard<'_, T>> {
         // For normal platforms, a compare exchange works well and is near the perf of spinlocks.
@@ -259,7 +246,7 @@ impl<T> Lock<T> {
     ///
     /// This assumes that the caller has ownership of the lock
     /// and is exposed for finer-grain control such as in a C-ffi setting.
-    #[cfg(not(all(target_atomic_u8, not(feature = "loom"))))]
+    #[cfg(not(target_atomic_u8))]
     #[inline]
     pub unsafe fn unlock(&self) {
         // Unlock the Lock using a fetch_sub as opposed to a fetch_and.
@@ -280,7 +267,7 @@ impl<T> Lock<T> {
     ///
     /// This assumes that the caller has ownership of the lock
     /// and is exposed for finer-grain control such as in a C-ffi setting.
-    #[cfg(all(target_atomic_u8, not(feature = "loom")))]
+    #[cfg(target_atomic_u8)]
     #[inline]
     pub unsafe fn unlock(&self) {
         // Unlock the Lock using an atomic store as opposed to usize
@@ -529,7 +516,7 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
         }
     }
 
-    #[cfg(all(target_atomic_u8, not(feature = "loom")))]
+    #[cfg(target_atomic_u8)]
     #[inline(always)]
     fn lock_acquire(lock: &'a Lock<T>, _state: usize) -> Result<LockGuard<'a, T>, usize> {
         lock.try_lock().ok_or_else(|| {
@@ -538,7 +525,7 @@ impl<'a, P: Parker, T> LockFuture<'a, P, T> {
         })
     }
 
-    #[cfg(not(all(target_atomic_u8, not(feature = "loom"))))]
+    #[cfg(not(target_atomic_u8))]
     #[inline(always)]
     fn lock_acquire(lock: &'a Lock<T>, state: usize) -> Result<LockGuard<'a, T>, usize> {
         lock.state

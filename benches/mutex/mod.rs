@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(feature = "loom")]
-extern crate libloom as loom;
-
 use std::{
     convert::TryInto,
     fmt,
@@ -384,45 +381,6 @@ struct Benchmarker {
 }
 
 impl Benchmarker {
-    #[cfg(feature = "loom")]
-    fn bench<L: Lock>(&self) {
-        let this = *self;
-        if this.measure.as_nanos() != 0 {
-            return;
-        }
-
-        print!("{}: ", L::NAME);
-        loom::model(move || {
-            let iter_count = 10_000;
-            let lock = Arc::new(L::new());
-
-            (0..this.threads)
-                .map(|_| {
-                    let lock = lock.clone();
-                    loom::thread::spawn(move || {
-                        let mut iterations = 0;
-                        let mut prng = (&iterations as *const _ as usize).wrapping_mul(31) as u64;
-
-                        while iterations < iter_count {
-                            let unlocked = this.unlocked.count(&mut prng);
-                            let locked = this.locked.count(&mut prng);
-
-                            lock.with(|| (0..locked).for_each(|_| WorkUnit::work()));
-                            iterations += 1;
-                            (0..unlocked).for_each(|_| WorkUnit::work());
-                        }
-
-                        iterations
-                    })
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-                .map(|t| t.join().expect("failed to join OS thread"))
-                .for_each(|iter| assert_eq!(iter, iter_count));
-        });
-    }
-
-    #[cfg(not(feature = "loom"))]
     fn bench<L: Lock>(&self) {
         use std::sync::{
             atomic::{AtomicBool, Ordering},

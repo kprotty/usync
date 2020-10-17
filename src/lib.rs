@@ -19,7 +19,7 @@
 //! relatively cheap resource like compute time over relatively expensive
 //! resources like memory.
 
-#![cfg_attr(not(any(test, feature = "std", feature = "loom")), no_std)]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(feature = "nightly", feature(doc_cfg))]
 #![warn(
     missing_docs,

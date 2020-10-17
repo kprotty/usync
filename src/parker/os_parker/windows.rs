@@ -13,13 +13,8 @@
 // limitations under the License.
 
 use super::OsInstant as Instant;
-use crate::utils::sync::{AtomicInt, Int, Ordering};
+use crate::utils::sync::{AtomicInt, Int, AtomicUsize, Ordering};
 use core::{cell::Cell, convert::TryInto, fmt, mem, ptr};
-
-#[cfg(not(feature = "loom"))]
-use crate::utils::sync::{AtomicUsize, Ordering as AtomicUsizeOrdering};
-#[cfg(feature = "loom")]
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicUsizeOrdering};
 
 static WAIT_FN: AtomicUsize = AtomicUsize::new(0);
 static WAKE_FN: AtomicUsize = AtomicUsize::new(0);
@@ -50,8 +45,8 @@ unsafe fn load_keyed_event_fns() {
         "failed to load NtReleaseKeyedEvent"
     );
 
-    WAIT_FN.store(wait_fn as usize, AtomicUsizeOrdering::Relaxed);
-    WAKE_FN.store(wake_fn as usize, AtomicUsizeOrdering::Relaxed);
+    WAIT_FN.store(wait_fn as usize, Ordering::Relaxed);
+    WAKE_FN.store(wake_fn as usize, Ordering::Relaxed);
 }
 
 const EMPTY: Int = 0;
