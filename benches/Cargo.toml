@@ -9,7 +9,7 @@ authors = ["kprotty"]
 [dependencies]
 parking_lot = "0.11"
 simple-mutex = "1.1"
-usync = { path = "../" }
+# usync = { path = "../" }
 
 [[bench]]
 name = "mutex"

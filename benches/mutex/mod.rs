@@ -30,7 +30,7 @@ mod plot_lock;
 mod simple_mutex_lock;
 mod spin_lock;
 mod sym_lock;
-mod usync_lock;
+// mod usync_lock;
 mod word_lock;
 mod word_lock_fair;
 mod word_lock_waking;
@@ -40,7 +40,7 @@ fn bench_all(b: &Benchmarker) {
     // b.bench::<spin_lock::Lock>();
     b.bench::<flume_wait_lock::Lock>();
 
-    b.bench::<usync_lock::Lock>();
+    // b.bench::<usync_lock::Lock>();
     // b.bench::<word_lock_waking::Lock>();
 
     b.bench::<os_lock::Lock>();
@@ -54,9 +54,9 @@ fn bench_all(b: &Benchmarker) {
 
     // b.bench::<keyed_lock::Lock>();
 
-    // b.bench::<futex_lock::FutexLock<futex_lock::OsFutex>>();
-    // #[cfg(any(windows, target_os = "linux"))]
-    // b.bench::<futex_lock::FutexLock<futex_lock::generic::Futex>>();
+    b.bench::<futex_lock::FutexLock<futex_lock::OsFutex>>();
+    #[cfg(any(windows, target_os = "linux"))]
+    b.bench::<futex_lock::FutexLock<futex_lock::generic::Futex>>();
 }
 
 pub unsafe trait Lock: Send + Sync + 'static {

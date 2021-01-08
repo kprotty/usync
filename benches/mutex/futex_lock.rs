@@ -65,33 +65,36 @@ impl<F: Futex> FutexLock<F> {
         loop {
             let mut spin = SpinWait::new();
             loop {
-                let state = self.state.load(Ordering::Relaxed);
-                if state == UNLOCKED {
-                    if self
+                match self.state.load(Ordering::Relaxed) {
+                    UNLOCKED => {
+                        if self
                         .state
                         .compare_exchange_weak(
-                            state,
+                            UNLOCKED,
                             acquire_state,
                             Ordering::Acquire,
                             Ordering::Relaxed,
                         )
-                        .is_ok()
-                    {
-                        return;
-                    }
+                        .is_ok() {
+                            return;
+                        }
+                    },
+                    LOCKED => {},
+                    PARKED => {},
+                    _ => unreachable!(),
                 }
+
                 if !spin.yield_now() {
                     break;
                 }
             }
-
-            let state = self.state.swap(PARKED, Ordering::Acquire);
-            if state == UNLOCKED {
+            
+            acquire_state = PARKED;
+            if self.state.swap(acquire_state, Ordering::Acquire) == UNLOCKED {
                 return;
             }
 
-            acquire_state = PARKED;
-            unsafe { self.futex.wait(&self.state, PARKED) };
+            unsafe { self.futex.wait(&self.state, acquire_state) };
         }
     }
 

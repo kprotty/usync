@@ -19,17 +19,16 @@
 //! relatively cheap resource like compute time over relatively expensive
 //! resources like memory.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(not(any(test, feature = "std")), no_std)]
 #![cfg_attr(feature = "nightly", feature(doc_cfg))]
 #![warn(
-    missing_docs,
+    // missing_docs,
     rust_2018_idioms,
-    missing_debug_implementations,
-    unreachable_pub
+    // missing_debug_implementations,
+    // unreachable_pub
 )]
 
-pub mod parker;
-
-pub mod utils;
+#[macro_use]
+mod cfg_if;
 
 pub mod sync;
