@@ -1,4 +1,4 @@
-// Copyright (c) 202 kprotty
+// Copyright (c) 2021 kprotty
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,4 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use parking_lot;
+mod lock;
+mod event;
+
+pub use self::{
+    lock::Lock,
+    event::Event,
+};
+
+use std::{
+    time::Instant,
+    sync::atomic::{AtomicI32, Ordering},
+};
+
+pub unsafe trait Futex {
+    fn wait(ptr: &AtomicI32, expect: i32, deadline: Option<Instant>) -> bool;
+
+    fn wake(ptr: &AtomicI32);
+
+    fn yield_now(iteration: usize) -> bool;
+}

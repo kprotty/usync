@@ -8,17 +8,13 @@ readme = "README.md"
 homepage = "https://github.com/kprotty"
 documentation = "https://docs.rs/usync"
 description = "(WIP) synchronization library"
-categories = ["asynchronous", "concurrency", "no-std", "data-structures"]
+categories = ["concurrency", "data-structures"]
 keywords = [
-    "no_std", "async", "atomic",
-    "lock", "lock-free", "non-blocking", 
+    "atomic", "lock",
     "mutex", "rwlock", "condvar", "once",
-    "futures", "channel", "queue", "mpmc", "producer", "consumer",
     "parallel", "parallelism", "thread", "concurrent", "performance",
 ]
 
 [features]
-default = ["std"]
+default = []
 nightly = []
-std = []
-os = []

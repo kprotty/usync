@@ -12,22 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This library exposes implementations of common synchronization primitives
-//! which aim to be small, fast, and above all else: resource efficient.
-//!
-//! By "resource efficient", this means that the tools should prioritize using
-//! relatively cheap resource like compute time over relatively expensive
-//! resources like memory.
+use super::{
+    Futex,
+    super::queue::ConfigLock,
+};
+use std::{
+    marker::PhantomData,
+    sync::atomic::{AtomicI32, Ordering},
+};
 
-#![cfg_attr(feature = "nightly", feature(doc_cfg))]
-#![warn(
-    // missing_docs,
-    rust_2018_idioms,
-    // missing_debug_implementations,
-    // unreachable_pub
-)]
+pub type Lock<F: Futex> {
+    state: AtomicI32,
+    futex: PhantomData<F>,
+}
 
-#[macro_use]
-mod cfg_if;
-
-pub mod internal;
+impl<F: Futex> ConfigLock for Lock<F> {
+    const INIT: 
+}
