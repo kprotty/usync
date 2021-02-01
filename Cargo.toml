@@ -22,7 +22,3 @@ default = ["std"]
 nightly = []
 std = []
 os = []
-
-[dependencies.lock_api]
-optional = true
-version = "0.4"
