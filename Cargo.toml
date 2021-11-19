@@ -1,28 +1,18 @@
 [package]
 name = "usync"
-version = "0.0.0"
-edition = "2018"
+version = "0.1.0"
+edition = "2021"
 license = "Apache-2.0"
 authors = ["kprotty"]
 readme = "README.md"
 homepage = "https://github.com/kprotty"
 documentation = "https://docs.rs/usync"
 description = "(WIP) synchronization library"
-categories = ["asynchronous", "concurrency", "no-std", "data-structures"]
+categories = ["concurrency", "data-structures"]
 keywords = [
-    "no_std", "async", "atomic",
-    "lock", "lock-free", "non-blocking", 
-    "mutex", "rwlock", "condvar", "once",
-    "futures", "channel", "queue", "mpmc", "producer", "consumer",
+    "lock", "mutex", "rwlock", "condvar", "once",
     "parallel", "parallelism", "thread", "concurrent", "performance",
 ]
 
-[features]
-default = ["std"]
-nightly = []
-std = []
-os = []
-
-[dependencies.lock_api]
-optional = true
-version = "0.4"
+[dependencies]
+once_cell = "1"
