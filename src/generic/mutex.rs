@@ -1,9 +1,53 @@
-use super::{waiter::Waiter, rwlock::{RwLock, RwLockWriteGuard}};
-use std::{
+use super::{Event, RwLock, RawRwLock, RwLockWriteGuard, RwLockState};
+use core::{
     fmt,
     mem::transmute,
     ops::{Deref, DerefMut},
 };
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
+pub enum MutexState {
+    Unlocked,
+    Locked,
+}
+
+#[repr(transparent)]
+#[derive(Default)]
+pub struct RawMutex {
+    raw_rwlock: RawRwLock,
+}
+
+impl RawMutex {
+    pub const fn new() -> Self {
+        Self {
+            raw_rwlock: RawRwLock::new(),
+        }
+    }
+
+    #[inline]
+    pub fn state(&self) -> MutexState {
+        match self.raw_rwlock.state() {
+            RwLockState::Unlocked => MutexState::Unlocked,
+            RwLockState::Exclusive => MutexState::Locked,
+            RwLockState::Shared => unreachable!(),
+        }
+    }
+
+    #[inline]
+    pub fn try_lock(&self) -> bool {
+        self.raw_rwlock.try_write()
+    }
+
+    #[inline]
+    pub fn lock<E: Event>(&self) {
+        self.raw_rwlock.write::<E>()
+    }
+
+    #[inline]
+    pub unsafe fn unlock(&self) {
+        self.raw_rwlock.unlock_write()
+    }
+}
 
 #[repr(transparent)]
 pub struct Mutex<T: ?Sized> {
@@ -40,6 +84,12 @@ impl<T> Mutex<T> {
 
 impl<T: ?Sized> Mutex<T> {
     #[inline]
+    pub fn raw(&self) -> &RawMutex {
+        let raw_rwlock = self.rwlock.raw();
+        unsafe { transmute(raw_rwlock) } // SAFETY: RawMutex is transparent
+    }
+
+    #[inline]
     pub fn data_ptr(&self) -> *mut T {
         self.rwlock.data_ptr()
     }
@@ -50,8 +100,12 @@ impl<T: ?Sized> Mutex<T> {
     }
 
     #[inline]
-    pub fn is_locked(&self) -> bool {
-        self.rwlock.is_locked_exclusive()
+    pub fn state(&self) -> MutexState {
+        match self.rwlock.state() {
+            RwLockState::Unlocked => MutexState::Unlocked,
+            RwLockState::Exclusive => MutexState::Locked,
+            RwLockState::Shared => unreachable!(),
+        }
     }
 
     #[inline]
@@ -71,16 +125,6 @@ impl<T: ?Sized> Mutex<T> {
     pub unsafe fn force_unlock(&self) {
         self.rwlock.force_unlock_write()
     }
-
-    #[inline]
-    pub(super) unsafe fn unpark_requeue(
-        &self,
-        head: NonNull<Waiter>,
-        tail: NonNull<Waiter>,
-    ) {
-        let is_writer = true;
-        self.rwlock.unpark_requeue(is_writer, head, tail)
-    }
 }
 
 pub struct MutexGuard<'a, T: ?Sized> {
@@ -90,7 +134,7 @@ pub struct MutexGuard<'a, T: ?Sized> {
 impl<'a, T: ?Sized> MutexGuard<'a, T> {
     pub fn mutex(this: &Self) -> &'a Mutex<T> {
         let rwlock = RwLockWriteGuard::rwlock(&this.guard);
-        unsafe { transmute(rwlock) } // SAFETY: repr(transparent)
+        unsafe { transmute(rwlock) } // SAFETY: Mutex is repr(transparent)
     }
 }
 

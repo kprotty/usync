@@ -1,13 +1,53 @@
 use super::{waiter::Waiter};
-use std::{
+use core::{
     fmt,
     cell::UnsafeCell,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicUsize, fence, Ordering},
 };
 
-pub struct RwLock<T: ?Sized> {
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Hash)]
+pub enum RwLockState {
+    Unlocked,
+    Exclusive,
+    Shared,
+}
+
+#[derive(Default)]
+pub struct RawRwLock {
     state: AtomicUsize,
+}
+
+impl RawRwLock {
+    pub const fn new() -> Self {
+        Self {
+            raw_rwlock: RawRwLock::new(),
+        }
+    }
+
+    #[inline]
+    pub fn state(&self) -> RwLockState {
+        
+    }
+
+    #[inline]
+    pub fn try_lock(&self) -> bool {
+        self.raw_rwlock.try_write()
+    }
+
+    #[inline]
+    pub fn lock<E: Event>(&self) {
+        self.raw_rwlock.write::<E>()
+    }
+
+    #[inline]
+    pub unsafe fn unlock(&self) {
+        self.raw_rwlock.unlock_write()
+    }
+}
+
+pub struct RwLock<T: ?Sized> {
+    raw_rwlock: RawRwLock,
     value: UnsafeCell<T>,
 }
 
@@ -35,7 +75,8 @@ impl<T: ?Sized> From<T> for RwLock<T> {
 impl<T> RwLock<T> {
     pub const fn new(value: T) -> Self {
         Self {
-            rwlock: RwLock::new(value),
+            raw_rwlock: RawRwLock::new(),
+            value: RwLock::new(value),
         }
     }
 }
@@ -43,16 +84,21 @@ impl<T> RwLock<T> {
 impl<T: ?Sized> RwLock<T> {
     #[inline]
     pub fn data_ptr(&self) -> *mut T {
-        self.rwlock.data_ptr()
+        self.value.get()
+    }
+
+    #[inline]
+    pub fn raw(&self) -> &RawRWLock {
+        &self.raw_rwlock
     }
 
     #[inline]
     pub fn get_mut(&mut self) -> &mut T {
-        self.rwlock.get_mut()
+        unsafe { &mut *self.data_ptr() }
     }
 
     #[inline]
-    pub fn is_locked(&self) -> bool {
+    pub fn state(&self) -> bool {
         
     }
 
@@ -73,16 +119,6 @@ impl<T: ?Sized> RwLock<T> {
 
     pub unsafe fn force_unlock_read(&self) {
 
-    }
-
-    #[cold]
-    pub(super) unsafe fn unpark_requeue(
-        &self,
-        is_writer: bool,
-        head: NonNull<Waiter>,
-        tail: NonNull<Waiter>,
-    ) {
-        
     }
 }
 

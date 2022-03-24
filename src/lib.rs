@@ -5,17 +5,10 @@
     // missing_debug_implementations    
 )]
 
-mod barrier;
-mod condvar;
-mod mutex;
-mod once;
-mod rwlock;
-mod waiter;
+pub mod generic;
 
-pub use self::{
-    barrier::{Barrier, BarrierWaitResult},
-    condvar::{Condvar, WaitTimeoutResult},
-    mutex::{Mutex, MutexGuard},
-    rwlock::{RwLock, RwLockReadGuard, RwLockWriteGuard},
-    once::{Once, OnceState},
-};
+#[cfg(feature = "std")]
+pub use std_sync::*;
+
+#[cfg(feature = "std")]
+mod std_sync;

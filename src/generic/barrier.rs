@@ -1,5 +1,5 @@
 use super::waiter::Waiter;
-use std::{
+use core::{
     fmt,
     sync::atomic::{AtomicUsize, fence, Ordering},
 };
@@ -21,22 +21,19 @@ impl Barrier {
     }
     
     #[inline]
-    pub fn wait(&self) -> BarrierWaitResult {
-        let mut is_leader = false;
+    pub fn wait(&self) -> bool {
         let state = self.state.load(Ordering::Acquire);
-    
-        if state != COMPLETED {
-            is_leader = self.wait_slow(state);
+        if state == COMPLETED {
+            return false;
         }
-
-        BarrierWaitResult { is_leader }
+    
+        self.wait_slow(state)
     }
 
     #[cold]
     fn wait_slow(&self, mut state: usize) -> bool {
         Waiter::with(|waiter| {
             waiter.resource.set(Some(NonNull::from(self).cast()));
-            waiter.parker.prepare();
             waiter.prev.set(None);
 
             loop {
@@ -89,7 +86,7 @@ impl Barrier {
 
             fence(Ordering::Acquire);
             let mut discovered = 0;
-            let (head, tail) = Waiter::get_queue(state, |_| discovered += 1);
+            let (head, tail) = Waiter::get_and_link_queue(state, |_| discovered += 1);
             
             let mut counter = tail.as_ref().counter.load(Ordering::Relaxed);
             assert_ne!(counter, 0);
@@ -125,16 +122,5 @@ impl Barrier {
             waiters = waiter.as_ref().next.get();
             waiter.as_ref().unpark();
         }
-    }
-}
-
-#[derive(Default, Copy, Clone)]
-pub struct BarrierWaitResult {
-    is_leader: bool,
-}
-
-impl BarrierWaitResult {
-    const fn is_leader(&self) -> bool {
-        self.is_leader
     }
 }

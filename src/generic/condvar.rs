@@ -1,4 +1,4 @@
-use std::{
+use core::{
     fmt,
     sync::atomic::{AtomicUsize, fence, Ordering},
 };
@@ -14,15 +14,6 @@ impl Condvar {
             state: AtomicUsize::new(),
         }
     }
-}
 
-#[derive(Default, Copy, Clone)]
-pub struct WaitTimeoutResult {
-    timed_out: bool,
-}
 
-impl WaitTimeoutResult {
-    const fn timed_out(&self) -> bool {
-        self.timed_out
-    }
 }
