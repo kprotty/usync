@@ -595,29 +595,34 @@ mod tests {
         assert_eq!(format!("{:?}", c), "Condvar { .. }");
     }
 
-    // #[test]
-    // fn test_condvar_requeue() {
-    //     let m = Arc::new(Mutex::new(()));
-    //     let m2 = m.clone();
-    //     let c = Arc::new(Condvar::new());
-    //     let c2 = c.clone();
-    //     let t = thread::spawn(move || {
-    //         let mut g = m2.lock();
-    //         c2.wait(&mut g);
-    //     });
+    #[test]
+    fn test_condvar_requeue() {
+        let m = Arc::new(Mutex::new(()));
+        let m2 = m.clone();
+        let c = Arc::new(Condvar::new());
+        let c2 = c.clone();
+        let t = thread::spawn(move || {
+            let mut g = m2.lock();
+            c2.wait(&mut g);
+        });
 
-    //     let mut g = m.lock();
-    //     while !c.notify_one() {
-    //         // Wait for the thread to get into wait()
-    //         MutexGuard::bump(&mut g);
-    //         // Yield, so the other thread gets a chance to do something.
-    //         // (At least Miri needs this, because it doesn't preempt threads.)
-    //         thread::yield_now();
-    //     }
-    //     // The thread should have been requeued to the mutex, which we wake up now.
-    //     drop(g);
-    //     t.join().unwrap();
-    // }
+        let mut g = m.lock();
+        while !c.notify_one() {
+            // Wait for the thread to get into wait()
+            
+            //MutexGuard::bump(&mut g);
+            drop(g);
+            thread::yield_now();
+            g = m.lock();
+
+            // Yield, so the other thread gets a chance to do something.
+            // (At least Miri needs this, because it doesn't preempt threads.)
+            thread::yield_now();
+        }
+        // The thread should have been requeued to the mutex, which we wake up now.
+        drop(g);
+        t.join().unwrap();
+    }
 
     #[test]
     fn test_parking_lot_issue_129() {
