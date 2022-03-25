@@ -11,11 +11,13 @@ use std::{
 pub(crate) struct AtomicWaiterCell(AtomicPtr<Waiter>);
 
 impl AtomicWaiterCell {
+    #[inline]
     pub(crate) fn set(&self, ptr: Option<NonNull<Waiter>>) {
         let ptr = ptr.map(|p| p.as_ptr()).unwrap_or(ptr::null_mut());
         self.0.store(ptr, Ordering::Relaxed);
     }
 
+    #[inline]
     pub(crate) fn get(&self) -> Option<NonNull<Waiter>> {
         let ptr = self.0.load(Ordering::Relaxed);
         NonNull::new(ptr)

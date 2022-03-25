@@ -148,7 +148,7 @@ impl RawRwLock {
 
     #[cold]
     fn lock_exclusive_slow(&self) {
-        let is_writer = false;
+        let is_writer = true;
         let try_lock = |state: usize| -> Option<bool> {
             match state & LOCKED {
                 0 => Some(self.lock_exclusive_fast_assuming(state)),
@@ -215,15 +215,17 @@ impl RawRwLock {
             if let Some(result) = self.try_lock_shared_uncontended() {
                 return Some(result);
             }
-        } else if state & (LOCKED | READING | QUEUED) == (LOCKED | READING) {
-            if let Some(with_reader) = state.checked_add(1 << READER_SHIFT) {
-                return Some(self.state.compare_exchange_weak(
-                    state,
-                    with_reader | LOCKED | READING,
-                    Ordering::Acquire,
-                    Ordering::Relaxed,
-                ));
-            }
+        } else if state & (LOCKED | READING | QUEUED) != (LOCKED | READING) {
+            return None;
+        }
+
+        if let Some(with_reader) = state.checked_add(1 << READER_SHIFT) {
+            return Some(self.state.compare_exchange_weak(
+                state,
+                with_reader | LOCKED | READING,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ));
         }
 
         None
@@ -428,17 +430,15 @@ impl RawRwLock {
                     let mut new_state = (state & !Waiter::MASK) | waiter_ptr | QUEUED;
 
                     if state & QUEUED == 0 {
-                        waiter
-                            .counter
-                            .store(state >> READER_SHIFT, Ordering::Relaxed);
+                        let readers = state >> READER_SHIFT;
+                        waiter.counter.store(readers, Ordering::Relaxed);
                         waiter.tail.set(Some(NonNull::from(&*waiter)));
                         waiter.next.set(None);
                     } else {
+                        let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
                         new_state |= QUEUE_LOCKED;
                         waiter.tail.set(None);
-                        waiter
-                            .next
-                            .set(NonNull::new((state & Waiter::MASK) as *mut Waiter));
+                        waiter.next.set(head);
                     }
 
                     if let Err(e) = self.state.compare_exchange_weak(
