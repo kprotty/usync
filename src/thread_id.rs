@@ -5,6 +5,7 @@ use std::{
     thread::{self, ThreadId},
 };
 
+#[derive(Default, Debug)]
 pub struct RawThreadId;
 
 unsafe impl lock_api::GetThreadId for RawThreadId {

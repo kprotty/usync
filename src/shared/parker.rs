@@ -3,7 +3,7 @@ use std::{
     pin::Pin,
     ptr::{self, NonNull},
     sync::atomic::{AtomicPtr, Ordering},
-    time::Instant,
+    time::Duration,
 };
 
 #[derive(Default)]
@@ -28,12 +28,12 @@ impl Parker {
         true
     }
 
-    pub(crate) fn park(&self, deadline: Option<Instant>) -> bool {
+    pub(crate) fn park(&self, timeout: Option<Duration>) -> bool {
         // Spin a little bit in hopes that another thread wakes us up.
         let mut spin = SpinWait::default();
         loop {
             if !spin.try_yield_now() {
-                return self.park_slow(deadline);
+                return self.park_slow(timeout);
             }
 
             let event = self.event.load(Ordering::Acquire);
@@ -44,7 +44,7 @@ impl Parker {
     }
 
     #[cold]
-    fn park_slow(&self, deadline: Option<Instant>) -> bool {
+    fn park_slow(&self, timeout: Option<Duration>) -> bool {
         Event::with(|ev| {
             // Register our event for waiting, bailing out if we we're notified.
             // AcqRel as Release on success which ensures the ev writes in Event::with() happen before unpark() tries to set() it.
@@ -59,7 +59,7 @@ impl Parker {
             }
 
             // Do a wait on the event and check if we timed out.
-            let timed_out = !ev.wait(deadline);
+            let timed_out = !ev.wait(timeout);
             if timed_out {
                 // On timeout, we must remove our event from self.event
                 // before returning to ensure that unpark() doesn't access invalid memory.

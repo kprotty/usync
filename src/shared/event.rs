@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
     sync::atomic::{AtomicBool, Ordering},
     thread,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub(super) struct Event {
@@ -29,18 +29,26 @@ impl Event {
     }
 
     #[cold]
-    pub(super) fn wait(self: Pin<&Self>, deadline: Option<Instant>) -> bool {
+    pub(super) fn wait(self: Pin<&Self>, timeout: Option<Duration>) -> bool {
+        let mut started = None;
         loop {
             if self.is_set.load(Ordering::Acquire) {
                 return true;
             }
 
-            match deadline {
+            match timeout {
                 None => thread::park(),
-                Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
-                    Some(until_deadline) => thread::park_timeout(until_deadline),
-                    None => return false,
-                },
+                Some(timeout) => {
+                    let now = Instant::now();
+                    let start = started.unwrap_or_else(|| Instant::now());
+                    started = Some(start);
+
+                    let elapsed = now - start;
+                    match timeout.checked_sub(elapsed) {
+                        Some(until_timeout) => thread::park_timeout(until_timeout),
+                        None => return false,
+                    }
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 use super::shared::{SpinWait, Waiter};
 use std::{
+    fmt,
     marker::PhantomData,
     ptr::NonNull,
     sync::atomic::{fence, AtomicUsize, Ordering},
@@ -18,6 +19,12 @@ const SINGLE_READER: usize = LOCKED | READING | (1 << READER_SHIFT);
 pub struct RawRwLock {
     pub(super) state: AtomicUsize,
     _p: PhantomData<*const Waiter>,
+}
+
+impl fmt::Debug for RawRwLock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("RawRwLock { .. }")
+    }
 }
 
 unsafe impl Send for RawRwLock {}
@@ -478,14 +485,17 @@ impl RawRwLock {
             let mut new_state = (state & !Waiter::MASK) | waiter_ptr | QUEUED;
 
             if state & QUEUED == 0 {
+                let readers = state >> READER_SHIFT;
+                tail.as_ref().counter.store(readers, Ordering::Relaxed);
+
                 queue_head.as_ref().tail.set(Some(tail));
                 tail.as_ref().next.set(None);
             } else {
                 new_state |= QUEUE_LOCKED;
                 queue_head.as_ref().tail.set(None);
-                tail.as_ref()
-                    .next
-                    .set(NonNull::new((state & Waiter::MASK) as *mut Waiter));
+
+                let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
+                tail.as_ref().next.set(head);
             }
 
             if let Err(e) = self.state.compare_exchange_weak(

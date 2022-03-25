@@ -1,10 +1,17 @@
 use super::RawRwLock;
 use lock_api::RawRwLock as _RawRwLock;
+use std::fmt;
 
 #[derive(Default)]
 #[repr(transparent)]
 pub struct RawMutex {
     pub(super) rwlock: RawRwLock,
+}
+
+impl fmt::Debug for RawMutex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad("RawMutex { .. }")
+    }
 }
 
 unsafe impl lock_api::RawMutex for RawMutex {
@@ -47,12 +54,12 @@ pub const fn const_mutex<T>(value: T) -> Mutex<T> {
 mod tests {
     use crate::{Condvar, Mutex};
     use std::{
-        thread,
         sync::{
-            Arc,
-            mpsc::channel,
             atomic::{AtomicUsize, Ordering},
+            mpsc::channel,
+            Arc,
         },
+        thread,
     };
 
     struct Packet<T>(Arc<(Mutex<T>, Condvar)>);
