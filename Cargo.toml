@@ -21,3 +21,6 @@ hardware-lock-elision = []
 
 [dependencies]
 lock_api = "0.4"
+
+[dev-dependencies]
+rand = "0.8.3"
