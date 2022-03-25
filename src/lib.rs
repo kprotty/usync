@@ -6,7 +6,7 @@
 )]
 
 // mod barrier;
-// mod condvar;
+mod condvar;
 // mod fair_mutex;
 mod mutex;
 // mod once;
@@ -24,7 +24,7 @@ type GuardMarker = lock_api::GuardNoSend;
 
 pub use self::{
     // barrier::{Barrier, BarrierWaitResult},
-    // condvar::{Condvar, WaitTimeoutResult},
+    condvar::{Condvar, WaitTimeoutResult},
     // fair_mutex::{const_fair_mutex, FairMutex, FairMutexGuard, MappedFairMutexGuard, RawFairMutex},
     mutex::{const_mutex, MappedMutexGuard, Mutex, MutexGuard, RawMutex},
     // once::{Once, OnceState},

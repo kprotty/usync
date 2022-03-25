@@ -4,7 +4,7 @@ use lock_api::RawRwLock as _RawRwLock;
 #[derive(Default)]
 #[repr(transparent)]
 pub struct RawMutex {
-    rwlock: RawRwLock,
+    pub(super) rwlock: RawRwLock,
 }
 
 unsafe impl lock_api::RawMutex for RawMutex {

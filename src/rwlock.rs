@@ -16,7 +16,7 @@ const SINGLE_READER: usize = LOCKED | READING | (1 << READER_SHIFT);
 #[derive(Default)]
 #[repr(transparent)]
 pub struct RawRwLock {
-    state: AtomicUsize,
+    pub(super) state: AtomicUsize,
     _p: PhantomData<*const Waiter>,
 }
 
