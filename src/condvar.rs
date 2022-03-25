@@ -18,6 +18,9 @@ pub struct Condvar {
     _p: PhantomData<*const Waiter>,
 }
 
+unsafe impl Send for Condvar {}
+unsafe impl Sync for Condvar {}
+
 impl Condvar {
     pub const fn new() -> Self {
         Self {
@@ -71,7 +74,7 @@ impl Condvar {
                 let waiter_ptr = &*waiter as *const Waiter as usize;
                 let mut new_state = (state & !Waiter::MASK) | waiter_ptr;
 
-                if head.is_some() {
+                if head.is_none() {
                     waiter.tail.set(Some(NonNull::from(&*waiter)));
                 } else {
                     new_state |= SIGNAL_LOCKED;
@@ -110,7 +113,7 @@ impl Condvar {
     #[inline]
     pub fn notify_one(&self) {
         let state = self.state.load(Ordering::Relaxed);
-        if state == EMPTY {
+        if state != EMPTY {
             self.notify_one_slow(state);
         }
     }
@@ -118,7 +121,7 @@ impl Condvar {
     #[cold]
     fn notify_one_slow(&self, mut state: usize) {
         while state != EMPTY {
-            if state & SIGNAL_LOCKED != 0 {
+            if state & SIGNAL_LOCKED == 0 {
                 // Try to acquire the signal lock to wake up the queued threads.
                 let new_state = state | SIGNAL_LOCKED;
                 if let Err(e) = self.state.compare_exchange_weak(
