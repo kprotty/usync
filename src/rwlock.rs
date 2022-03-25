@@ -469,33 +469,27 @@ impl RawRwLock {
     }
 
     #[cold]
-    pub(super) unsafe fn unpark_requeue(&self, head: NonNull<Waiter>, tail: NonNull<Waiter>) {
+    pub(super) unsafe fn unpark_requeue(&self, queue_head: NonNull<Waiter>, queue_tail: NonNull<Waiter>) {
+        queue_head.as_ref().prev.set(None);
+        queue_head.as_ref().tail.set(None);
+        queue_tail.as_ref().tail.set(None);
+
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
-            let mut queue_head = head;
-            if state & LOCKED == 0 {
-                match head.as_ref().next.get() {
-                    Some(next) => queue_head = next,
-                    None => return self.unpark_waiters(head),
-                }
+            if state & QUEUED == 0 {
+                let readers = state >> READER_SHIFT;
+                queue_tail.as_ref().counter.store(readers, Ordering::Relaxed);
+                queue_tail.as_ref().tail.set(Some(queue_tail));
+                queue_tail.as_ref().next.set(None);
+            } else {
+                let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
+                let head = head.expect("Lock has queued bit without a waiter");
+                queue_tail.as_ref().tail.set(None);
+                queue_tail.as_ref().next.set(Some(head));
             }
 
             let waiter_ptr = queue_head.as_ptr() as usize;
-            let mut new_state = (state & !Waiter::MASK) | waiter_ptr | QUEUED;
-
-            if state & QUEUED == 0 {
-                let readers = state >> READER_SHIFT;
-                tail.as_ref().counter.store(readers, Ordering::Relaxed);
-
-                queue_head.as_ref().tail.set(Some(tail));
-                tail.as_ref().next.set(None);
-            } else {
-                new_state |= QUEUE_LOCKED;
-                queue_head.as_ref().tail.set(None);
-
-                let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
-                tail.as_ref().next.set(head);
-            }
+            let new_state = (state & !Waiter::MASK) | waiter_ptr | QUEUED | QUEUE_LOCKED;
 
             if let Err(e) = self.state.compare_exchange_weak(
                 state,
@@ -507,12 +501,8 @@ impl RawRwLock {
                 continue;
             }
 
-            if state & (QUEUED | QUEUE_LOCKED) == QUEUED {
+            if state & QUEUE_LOCKED == 0 {
                 self.link_queue_or_unpark(new_state);
-            }
-
-            if queue_head != head {
-                self.unpark_waiters(head);
             }
 
             return;

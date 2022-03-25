@@ -150,7 +150,7 @@ impl Condvar {
                     continue;
                 }
 
-                unsafe { self.unpark(new_state) };
+                unsafe { self.unpark(new_state, 1) };
                 return true;
             }
 
@@ -230,7 +230,7 @@ impl Condvar {
 
             let signals = state & SIGNAL_MASK;
             if signals > 0 {
-                return self.unpark(state);
+                return self.unpark(state, 0);
             }
 
             fence(Ordering::Acquire);
@@ -249,8 +249,8 @@ impl Condvar {
     }
 
     #[cold]
-    unsafe fn unpark(&self, mut state: usize) {
-        let mut scanned = 0;
+    unsafe fn unpark(&self, mut state: usize, also_wake: usize) {
+        let mut notified = 0;
         let mut unparked = None;
 
         loop {
@@ -265,63 +265,54 @@ impl Condvar {
             let (head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
             let (mut front, back) = unparked.unwrap_or_else(|| {
-                scanned += 1;
+                notified += 1;
                 (tail, tail)
             });
 
-            let max_scan = signals + 1;
-            while scanned < max_scan {
+            let max_notify = signals + also_wake;
+            while notified < max_notify {
                 if let Some(prev) = front.as_ref().prev.get() {
                     front = prev;
-                    scanned += 1;
+                    notified += 1;
                 } else {
                     break;
                 }
             }
 
-            if scanned >= SIGNAL_MASK {
+            unparked = Some((front, back));
+            if notified >= SIGNAL_MASK {
                 return self.unpark_all();
             }
-            
-            if front == head {
+
+            if let Some(new_tail) = front.as_ref().prev.get() {
+                head.as_ref().tail.set(Some(new_tail));
+
+                let mut new_state = state & !SIGNAL_LOCKED;
+                new_state -= signals.saturating_sub(notified) * SIGNAL;
+
                 match self.state.compare_exchange_weak(
                     state,
-                    EMPTY,
+                    new_state,
                     Ordering::Release,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => return self.unpark_requeue(head, tail),
+                    Ok(_) => return self.unpark_requeue(front, back),
                     Err(e) => state = e,
                 }
+
+                head.as_ref().tail.set(Some(back));
                 continue;
             }
 
-            let new_tail = front.as_ref().prev.get().unwrap();
-            front.as_ref().prev.set(None);
-
-            new_tail.as_ref().next.set(None);
-            new_tail.as_ref().tail.set(Some(tail));
-            head.as_ref().tail.set(Some(new_tail));
-
-            let mut new_state = state & !SIGNAL_LOCKED;
-            new_state -= signals.saturating_sub(scanned) * SIGNAL;
-
             match self.state.compare_exchange_weak(
                 state,
-                new_state,
+                EMPTY,
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return self.unpark_requeue(front, back),
+                Ok(_) => return self.unpark_requeue(head, tail),
                 Err(e) => state = e,
             }
-            
-            front.as_ref().prev.set(Some(new_tail));
-            unparked = Some((front, back));
-
-            new_tail.as_ref().next.set(Some(front));
-            new_tail.as_ref().tail.set(Some(back));
-            head.as_ref().tail.set(Some(back));
         }
     }
 
@@ -342,6 +333,9 @@ impl Condvar {
 
     #[cold]
     unsafe fn unpark_requeue(&self, head: NonNull<Waiter>, tail: NonNull<Waiter>) {
+        head.as_ref().prev.set(None);
+        tail.as_ref().next.set(None);
+
         let waiting_on = head.as_ref().waiting_on.get();
         let waiting_on = waiting_on.expect("Condvar waiter not waiting on anything");
 
@@ -351,9 +345,12 @@ impl Condvar {
             waiter.as_ref().tail.set(None);
 
             let wait_ptr = waiter.as_ref().waiting_on.get();
-            assert_eq!(wait_ptr, Some(waiting_on), "Condvar waiters not waiting on same thing");
+            assert_eq!(
+                wait_ptr,
+                Some(waiting_on),
+                "Condvar waiters not waiting on the same thing"
+            );
         }
-    
 
         let raw_rwlock = waiting_on.cast::<RawRwLock>();
         raw_rwlock.as_ref().unpark_requeue(head, tail);
@@ -617,7 +614,7 @@ mod tests {
         let mut g = m.lock();
         while !c.notify_one() {
             // Wait for the thread to get into wait()
-            
+
             //MutexGuard::bump(&mut g);
             drop(g);
             thread::yield_now();
