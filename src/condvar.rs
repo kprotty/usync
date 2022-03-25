@@ -283,7 +283,6 @@ impl Condvar {
                 return self.unpark_all();
             }
             
-            unparked = Some((front, back));
             if front == head {
                 match self.state.compare_exchange_weak(
                     state,
@@ -298,6 +297,8 @@ impl Condvar {
             }
 
             let new_tail = front.as_ref().prev.get().unwrap();
+            front.as_ref().prev.set(None);
+
             new_tail.as_ref().next.set(None);
             new_tail.as_ref().tail.set(Some(tail));
             head.as_ref().tail.set(Some(new_tail));
@@ -314,6 +315,9 @@ impl Condvar {
                 Ok(_) => return self.unpark_requeue(front, back),
                 Err(e) => state = e,
             }
+            
+            front.as_ref().prev.set(Some(new_tail));
+            unparked = Some((front, back));
 
             new_tail.as_ref().next.set(Some(front));
             new_tail.as_ref().tail.set(Some(back));
@@ -343,9 +347,13 @@ impl Condvar {
 
         let mut waiters = Some(head);
         while let Some(waiter) = waiters {
-            waiter.as_ref().tail.set(None);
             waiters = waiter.as_ref().next.get();
+            waiter.as_ref().tail.set(None);
+
+            let wait_ptr = waiter.as_ref().waiting_on.get();
+            assert_eq!(wait_ptr, Some(waiting_on), "Condvar waiters not waiting on same thing");
         }
+    
 
         let raw_rwlock = waiting_on.cast::<RawRwLock>();
         raw_rwlock.as_ref().unpark_requeue(head, tail);

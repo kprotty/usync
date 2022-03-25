@@ -91,8 +91,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     unsafe fn unlock_exclusive(&self) {
         let state = self.state.fetch_sub(LOCKED, Ordering::Release);
-        debug_assert_ne!(state & LOCKED, 0);
-        debug_assert_eq!(state & READING, 0);
+        debug_assert_eq!(state & (LOCKED | READING), LOCKED);
 
         if state & (QUEUED | QUEUE_LOCKED) == QUEUED {
             self.unlock_exclusive_slow(state);
