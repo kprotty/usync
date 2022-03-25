@@ -1,8 +1,8 @@
 use super::shared::{SpinWait, Waiter};
-use lock_api;
 use std::{
     marker::PhantomData,
-    sync::atomic::{AtomicUsize, fence, Ordering},
+    ptr::NonNull,
+    sync::atomic::{fence, AtomicUsize, Ordering},
 };
 
 const UNLOCKED: usize = 0;
@@ -93,7 +93,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
     }
 
     #[inline]
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     unsafe fn unlock_exclusive(&self) {
         if let Err(state) =
             self.state
@@ -120,7 +120,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
         let mut state = self.state.load(Ordering::Relaxed);
         if state == SINGLE_READER {
             match self.try_unlock_shared_uncontended() {
-                None => {},
+                None => {}
                 Some(Ok(_)) => return,
                 Some(Err(e)) => state = e,
             }
@@ -136,6 +136,7 @@ impl RawRwLock {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         return {
             let _ = state;
+            use lock_api::RawRwLock;
             self.try_lock_exclusive()
         };
 
@@ -266,7 +267,7 @@ impl RawRwLock {
     fn try_lock_shared_fast(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
         let result = self.try_lock_shared_assuming(state);
-        matches!(result, Ok(_))
+        matches!(result, Some(Ok(_)))
     }
 
     #[cold]
@@ -286,7 +287,7 @@ impl RawRwLock {
         let is_writer = false;
         let try_lock = |state: usize| -> Option<bool> {
             let result = self.try_lock_shared_assuming(state)?;
-            result.is_ok()
+            Some(result.is_ok())
         };
 
         self.lock(is_writer, try_lock)
@@ -336,12 +337,12 @@ impl RawRwLock {
                 new_state = UNLOCKED;
 
                 match self.try_unlock_shared_uncontended() {
-                    None => {},
+                    None => {}
                     Some(Ok(_)) => return,
                     Some(Err(e)) => {
                         state = e;
                         continue;
-                    },
+                    }
                 }
             }
 
@@ -359,9 +360,9 @@ impl RawRwLock {
         assert_ne!(state & LOCKED, 0);
         assert_ne!(state & QUEUED, 0);
         assert_ne!(state & READING, 0);
-       
+
         fence(Ordering::Acquire);
-        let (head, tail) = Waiter::get_and_link_queue(state);
+        let (_head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
         let readers = tail.as_ref().counter.fetch_sub(1, Ordering::Release);
         assert_ne!(readers, 0);
@@ -372,7 +373,28 @@ impl RawRwLock {
 
         state = self.state.load(Ordering::Relaxed);
         loop {
+            assert_ne!(state & LOCKED, 0);
+            assert_ne!(state & READING, 0);
+            assert_ne!(state & QUEUED, 0);
 
+            let mut new_state = state & !(LOCKED | READING);
+            new_state |= QUEUE_LOCKED;
+
+            if let Err(e) = self.state.compare_exchange_weak(
+                state,
+                new_state,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                state = e;
+                continue;
+            }
+
+            if state & QUEUE_LOCKED == 0 {
+                self.unpark(new_state);
+            }
+
+            return;
         }
     }
 
@@ -406,13 +428,17 @@ impl RawRwLock {
                     let mut new_state = (state & !Waiter::MASK) | waiter_ptr | QUEUED;
 
                     if state & QUEUED == 0 {
-                        waiter.counter.store(state >> READER_SHIFT, Ordering::Relaxed);
+                        waiter
+                            .counter
+                            .store(state >> READER_SHIFT, Ordering::Relaxed);
                         waiter.tail.set(Some(NonNull::from(&*waiter)));
                         waiter.next.set(None);
                     } else {
                         new_state |= QUEUE_LOCKED;
                         waiter.tail.set(None);
-                        waiter.next.set(NonNull::new((state & Waiter::MASK) as *mut Waiter));
+                        waiter
+                            .next
+                            .set(NonNull::new((state & Waiter::MASK) as *mut Waiter));
                     }
 
                     if let Err(e) = self.state.compare_exchange_weak(
@@ -426,7 +452,7 @@ impl RawRwLock {
                     }
 
                     if state & (QUEUED | QUEUE_LOCKED) == QUEUED {
-                        self.link_queue_or_unpark(new_state);
+                        unsafe { self.link_queue_or_unpark(new_state) };
                     }
 
                     assert!(waiter.parker.park(None));
@@ -455,9 +481,11 @@ impl RawRwLock {
                 queue_head.as_ref().tail.set(Some(tail));
                 tail.as_ref().next.set(None);
             } else {
-                new_state | QUEUE_LOCKED;
+                new_state |= QUEUE_LOCKED;
                 queue_head.as_ref().tail.set(None);
-                tail.as_ref().next.set(NonNull::new((state & Waiter::MASK) as *mut Waiter));
+                tail.as_ref()
+                    .next
+                    .set(NonNull::new((state & Waiter::MASK) as *mut Waiter));
             }
 
             if let Err(e) = self.state.compare_exchange_weak(
@@ -493,7 +521,7 @@ impl RawRwLock {
             }
 
             fence(Ordering::Acquire);
-            let _ = Waiter::get_and_link_queue(state);
+            let _ = Waiter::get_and_link_queue(state, |_| {});
 
             match self.state.compare_exchange_weak(
                 state,
@@ -527,9 +555,9 @@ impl RawRwLock {
             }
 
             fence(Ordering::Acquire);
-            let (head, tail) = Waiter::get_and_link_queue(state);
-            
-            let is_writer = tail.as_ref().flags.get() as bool;
+            let (head, tail) = Waiter::get_and_link_queue(state, |_| {});
+
+            let is_writer = tail.as_ref().flags.get() != 0;
             if is_writer {
                 if let Some(new_tail) = tail.as_ref().prev.get() {
                     head.as_ref().tail.set(Some(new_tail));
@@ -553,7 +581,7 @@ impl RawRwLock {
     }
 
     #[cold]
-    unsafe fn unpark_waiters(&self, tail: NonNull<Waiter>) {
+    unsafe fn unpark_waiters(&self, mut tail: NonNull<Waiter>) {
         loop {
             let waiting_on = tail.as_ref().waiting_on.get();
             let waiting_on = waiting_on.expect("waking a waiter thats not waiting on anything");

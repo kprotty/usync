@@ -1,4 +1,9 @@
-use std::{hint::spin_loop, sync::atomic::{AtomicUsize, Ordering}, num::NonZeroUsize, thread::available_parallelism};
+use std::{
+    hint::spin_loop,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicUsize, Ordering},
+    thread::available_parallelism,
+};
 
 #[derive(Default)]
 pub(crate) struct SpinWait {
@@ -30,8 +35,6 @@ impl SpinWait {
             spin_loop();
         }
     }
-
-    
 }
 
 #[inline]
@@ -50,6 +53,7 @@ fn num_cpus() -> NonZeroUsize {
 #[cold]
 fn num_cpus_slow() -> NonZeroUsize {
     let num_cpus = available_parallelism()
+        .ok()
         .or(NonZeroUsize::new(1))
         .unwrap();
 
