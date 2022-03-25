@@ -332,7 +332,7 @@ impl Condvar {
     }
 
     #[cold]
-    unsafe fn unpark_requeue(&self, head: NonNull<Waiter>, tail: NonNull<Waiter>) {
+    unsafe fn unpark_requeue(&self, mut head: NonNull<Waiter>, mut tail: NonNull<Waiter>) {
         head.as_ref().prev.set(None);
         tail.as_ref().next.set(None);
 
@@ -345,15 +345,56 @@ impl Condvar {
             waiter.as_ref().tail.set(None);
 
             let wait_ptr = waiter.as_ref().waiting_on.get();
-            assert_eq!(
-                wait_ptr,
-                Some(waiting_on),
-                "Condvar waiters not waiting on the same thing"
-            );
+            let wait_ptr = wait_ptr.expect("Condvar waiter not waiter on anything");
+
+            if wait_ptr != waiting_on {
+                self.unpark_unrelated(&mut head, &mut tail, waiter);
+            }
         }
 
         let raw_rwlock = waiting_on.cast::<RawRwLock>();
         raw_rwlock.as_ref().unpark_requeue(head, tail);
+    }
+
+    #[cold]
+    unsafe fn unpark_unrelated(
+        &self,
+        head: &mut NonNull<Waiter>,
+        tail: &mut NonNull<Waiter>,
+        waiter: NonNull<Waiter>,
+    ) {
+        let prev = waiter.as_ref().prev.get();
+        let next = waiter.as_ref().next.get();
+
+        waiter.as_ref().next.set(None);
+        waiter.as_ref().prev.set(None);
+
+        if let Some(prev) = prev {
+            assert_ne!(*head, waiter);
+            prev.as_ref().next.set(next);
+
+            if let Some(next) = next {
+                assert_ne!(*tail, waiter);
+                next.as_ref().prev.set(Some(prev));
+            } else {
+                assert_eq!(*tail, waiter);
+                *tail = prev;
+                head.as_ref().tail.set(Some(prev));
+            }
+        } else {
+            assert_eq!(*head, waiter);
+            *head = match next {
+                Some(next) => next,
+                None => return,
+            };
+
+            assert_eq!(head.as_ref().prev.get(), Some(waiter));
+            head.as_ref().prev.set(None);
+        }
+
+        let waiting_on = waiter.as_ref().waiting_on.get();
+        let raw_rwlock = waiting_on.unwrap().cast::<RawRwLock>();
+        raw_rwlock.as_ref().unpark_requeue(waiter, waiter);
     }
 }
 
@@ -372,7 +413,7 @@ impl WaitTimeoutResult {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Condvar, Mutex, MutexGuard};
+    use crate::{Condvar, Mutex};
     use std::{
         sync::{mpsc::channel, Arc},
         thread,
@@ -545,7 +586,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn two_mutexes() {
         let m = Arc::new(Mutex::new(()));
         let m2 = m.clone();
@@ -572,7 +612,9 @@ mod tests {
         rx.recv().unwrap();
         let _g = m.lock();
         let _guard = PanicGuard(&*c);
-        c.wait(&mut m3.lock());
+
+        let result = c.wait_for(&mut m3.lock(), Duration::from_millis(100));
+        assert!(result.timed_out());
     }
 
     #[test]

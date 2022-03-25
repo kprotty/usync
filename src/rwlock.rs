@@ -469,7 +469,11 @@ impl RawRwLock {
     }
 
     #[cold]
-    pub(super) unsafe fn unpark_requeue(&self, queue_head: NonNull<Waiter>, queue_tail: NonNull<Waiter>) {
+    pub(super) unsafe fn unpark_requeue(
+        &self,
+        queue_head: NonNull<Waiter>,
+        queue_tail: NonNull<Waiter>,
+    ) {
         queue_head.as_ref().prev.set(None);
         queue_head.as_ref().tail.set(None);
         queue_tail.as_ref().tail.set(None);
@@ -478,7 +482,10 @@ impl RawRwLock {
         loop {
             if state & QUEUED == 0 {
                 let readers = state >> READER_SHIFT;
-                queue_tail.as_ref().counter.store(readers, Ordering::Relaxed);
+                queue_tail
+                    .as_ref()
+                    .counter
+                    .store(readers, Ordering::Relaxed);
                 queue_tail.as_ref().tail.set(Some(queue_tail));
                 queue_tail.as_ref().next.set(None);
             } else {
