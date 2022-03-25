@@ -15,5 +15,9 @@ keywords = [
     "parallel", "parallelism", "thread", "concurrent", "performance",
 ]
 
+[features]
+send_guard = []
+hardware-lock-elision = []
+
 [dependencies]
 lock_api = "0.4"

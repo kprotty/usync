@@ -1,22 +1,29 @@
-mod barrier;
-mod condvar;
-mod fair_mutex;
-mod mutex;
-mod once;
-mod reentrant_mutex;
+// mod barrier;
+// mod condvar;
+// mod fair_mutex;
+// mod mutex;
+// mod once;
+// mod reentrant_mutex;
 mod rwlock;
+mod shared;
+mod thread_id;
 
 pub use ::lock_api;
 
+#[cfg(feature = "send_guard")]
+type GuardMarker = lock_api::GuardSend;
+#[cfg(not(feature = "send_guard"))]
+type GuardMarker = lock_api::GuardNoSend;
+
 pub use self::{
-    barrier::{Barrier, BarrierWaitResult},
-    condvar::{Condvar, WaitTimeoutResult},
-    fair_mutex::{const_fair_mutex, FairMutex, FairMutexGuard, MappedFairMutexGuard, RawFairMutex},
-    mutex::{const_mutex, MappedMutexGuard, Mutex, MutexGuard, RawMutex},
-    once::{Once, OnceState},
-    reentrant_mutex::{
-        const_reentrant_mutex, MappedReentrantMutexGuard, ReentrantMutex, ReentrantMutexGuard,
-    },
+    // barrier::{Barrier, BarrierWaitResult},
+    // condvar::{Condvar, WaitTimeoutResult},
+    // fair_mutex::{const_fair_mutex, FairMutex, FairMutexGuard, MappedFairMutexGuard, RawFairMutex},
+    // mutex::{const_mutex, MappedMutexGuard, Mutex, MutexGuard, RawMutex},
+    // once::{Once, OnceState},
+    // reentrant_mutex::{
+    //     const_reentrant_mutex, MappedReentrantMutexGuard, ReentrantMutex, ReentrantMutexGuard,
+    // },
     rwlock::{
         const_rwlock, MappedRwLockReadGuard, MappedRwLockWriteGuard, RawRwLock, RwLock,
         RwLockReadGuard, RwLockWriteGuard,
