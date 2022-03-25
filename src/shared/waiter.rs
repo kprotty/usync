@@ -30,7 +30,7 @@ pub(crate) struct Waiter {
     pub(crate) next: Cell<Option<NonNull<Self>>>,
     pub(crate) prev: AtomicWaiterCell,
     pub(crate) tail: AtomicWaiterCell,
-    pub(crate) waiting_on: Cell<Option<NonNull<AtomicUsize>>>,
+    pub(crate) waiting_on: Cell<Option<NonNull<()>>>,
     pub(crate) counter: AtomicUsize,
     pub(crate) flags: Cell<usize>,
     pub(crate) parker: Parker,

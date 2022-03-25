@@ -409,7 +409,7 @@ impl RawRwLock {
 
     fn lock(&self, is_writer: bool, mut try_lock: impl FnMut(usize) -> Option<bool>) {
         Waiter::with(|waiter| {
-            waiter.waiting_on.set(Some(NonNull::from(&self.state)));
+            waiter.waiting_on.set(Some(NonNull::from(self).cast()));
             waiter.flags.set(is_writer as usize);
 
             loop {
@@ -595,9 +595,10 @@ impl RawRwLock {
         loop {
             let waiting_on = tail.as_ref().waiting_on.get();
             let waiting_on = waiting_on.expect("waking a waiter thats not waiting on anything");
+
             assert_eq!(
                 waiting_on,
-                NonNull::from(&self.state),
+                NonNull::from(self).cast(),
                 "waking a waiter thats not waiting on this lock",
             );
 

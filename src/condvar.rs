@@ -71,13 +71,13 @@ impl Condvar {
             waiter.flags.set(is_writer as usize);
 
             let raw_mutex = MutexGuard::mutex(mutex_guard).raw();
-            let rwlock_state = NonNull::from(&raw_mutex.rwlock.state);
+            let raw_rwlock = NonNull::from(&raw_mutex.rwlock);
 
-            waiter.waiting_on.set(Some(rwlock_state));
+            waiter.waiting_on.set(Some(raw_rwlock.cast()));
             waiter.prev.set(None);
 
             let mut state = self.state.load(Ordering::Relaxed);
-            loop {
+            let signal_locked = loop {
                 let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
                 waiter.next.set(head);
 
@@ -91,22 +91,22 @@ impl Condvar {
                     waiter.tail.set(None);
                 }
 
-                if let Err(e) = self.state.compare_exchange_weak(
+                match self.state.compare_exchange_weak(
                     state,
                     new_state,
                     Ordering::Release,
                     Ordering::Relaxed,
                 ) {
-                    state = e;
-                    continue;
+                    Ok(_) => break head.is_some() && (state & SIGNAL_LOCKED == 0),
+                    Err(e) => state = e,
                 }
+            };
 
-                if head.is_some() && (state & SIGNAL_LOCKED == 0) {
-                    self.link_queue_or_unpark(new_state);
-                }
+            raw_mutex.unlock();
 
-                raw_mutex.unlock();
-                break;
+            if signal_locked {
+                let state = self.state.load(Ordering::Relaxed);
+                self.link_queue_or_unpark(state);
             }
 
             let timed_out = !waiter.parker.park(timeout);
@@ -226,7 +226,7 @@ impl Condvar {
     #[cold]
     unsafe fn link_queue_or_unpark(&self, mut state: usize) {
         loop {
-            assert_eq!(state & SIGNAL_LOCKED, 0);
+            assert_ne!(state & SIGNAL_LOCKED, 0);
 
             let signals = state & SIGNAL_MASK;
             if signals > 0 {
@@ -282,31 +282,42 @@ impl Condvar {
             if scanned >= SIGNAL_MASK {
                 return self.unpark_all();
             }
+            
+            unparked = Some((front, back));
+            if front == head {
+                match self.state.compare_exchange_weak(
+                    state,
+                    EMPTY,
+                    Ordering::Release,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return self.unpark_requeue(head, tail),
+                    Err(e) => state = e,
+                }
+                continue;
+            }
+
+            let new_tail = front.as_ref().prev.get().unwrap();
+            new_tail.as_ref().next.set(None);
+            new_tail.as_ref().tail.set(Some(tail));
+            head.as_ref().tail.set(Some(new_tail));
 
             let mut new_state = state & !SIGNAL_LOCKED;
             new_state -= signals.saturating_sub(scanned) * SIGNAL;
 
-            if let Some(new_tail) = front.as_ref().prev.get() {
-                head.as_ref().tail.set(Some(new_tail));
-            } else {
-                new_state &= !Waiter::MASK;
-            }
-
-            if let Err(e) = self.state.compare_exchange_weak(
+            match self.state.compare_exchange_weak(
                 state,
                 new_state,
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
-                head.as_ref().tail.set(Some(back));
-                unparked = Some((front, back));
-                state = e;
-                continue;
+                Ok(_) => return self.unpark_requeue(front, back),
+                Err(e) => state = e,
             }
 
-            front.as_ref().prev.set(None);
-            self.unpark_requeue(head, tail);
-            return;
+            new_tail.as_ref().next.set(Some(front));
+            new_tail.as_ref().tail.set(Some(back));
+            head.as_ref().tail.set(Some(back));
         }
     }
 
@@ -328,12 +339,15 @@ impl Condvar {
     #[cold]
     unsafe fn unpark_requeue(&self, head: NonNull<Waiter>, tail: NonNull<Waiter>) {
         let waiting_on = head.as_ref().waiting_on.get();
-        let rwlock_state = waiting_on.expect("Condvar waiter not waiting on anything");
+        let waiting_on = waiting_on.expect("Condvar waiter not waiting on anything");
 
-        // SAFETY:
-        // RawRwLock is repr(transparent) to it's state.
-        // RawMutex is repr(transparent) to RawRwLock.
-        let raw_rwlock = rwlock_state.cast::<RawRwLock>();
+        let mut waiters = Some(head);
+        while let Some(waiter) = waiters {
+            waiter.as_ref().tail.set(None);
+            waiters = waiter.as_ref().next.get();
+        }
+
+        let raw_rwlock = waiting_on.cast::<RawRwLock>();
         raw_rwlock.as_ref().unpark_requeue(head, tail);
     }
 }
