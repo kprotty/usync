@@ -1,4 +1,5 @@
 use super::shared::{SpinWait, Waiter};
+use lock_api::RawRwLock as _RawRwLock;
 use std::{
     fmt,
     marker::PhantomData,
@@ -52,8 +53,56 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
     #[inline]
     fn try_lock_exclusive(&self) -> bool {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        return unsafe {
+        self.try_lock_exclusive_fast()
+    }
+
+    #[inline]
+    fn lock_exclusive(&self) {
+        if !self.try_lock_exclusive() {
+            self.lock_exclusive_slow();
+        }
+    }
+
+    #[inline]
+    unsafe fn unlock_exclusive(&self) {
+        self.unlock_exclusive_fast()
+    }
+
+    #[inline]
+    fn try_lock_shared(&self) -> bool {
+        self.try_lock_shared_fast() || self.try_lock_shared_slow()
+    }
+
+    #[inline]
+    fn lock_shared(&self) {
+        if !self.try_lock_shared_fast() {
+            self.lock_shared_slow();
+        }
+    }
+
+    #[inline]
+    unsafe fn unlock_shared(&self) {
+        if !self.unlock_shared_fast() {
+            self.unlock_shared_slow();
+        }
+    }
+}
+
+//  --- X86 Specializations
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+impl RawRwLock {
+    #[inline(always)]
+    fn try_lock_exclusive_assuming(&self, _state: usize) -> bool {
+        self.try_lock_exclusive()
+    }
+
+    #[inline(always)]
+    fn try_lock_exclusive_fast(&self) -> bool {
+        // On x86, `lock bts` is often faster for acquiring exclusive ownership
+        // than a `lock cmpxchg` as the former wont spuriously fail when a thread
+        // is updating the QUEUE_LOCKED bit or adding themselves to the queue.
+        unsafe {
             let mut old_locked_bit: u8;
             #[cfg(target_pointer_width = "64")]
             std::arch::asm!(
@@ -72,106 +121,45 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
                 options(nostack),
             );
             old_locked_bit == 0
-        };
-
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        self.state
-            .compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    #[inline]
-    fn lock_exclusive(&self) {
-        if !self.lock_exclusive_fast_assuming(UNLOCKED) {
-            self.lock_exclusive_slow();
         }
     }
 
-    #[inline]
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    unsafe fn unlock_exclusive(&self) {
+    #[inline(always)]
+    unsafe fn unlock_exclusive_fast(&self) {
+        // On x86, we unlock the exclusive lock first, then try and wake later.
+        // This is faster than using a `lock cmpxchg` loop as it doesn't have
+        // to fail and retry from other threads updating QUEUE_LOCKED bit or queueing themselves.
         let state = self.state.fetch_sub(LOCKED, Ordering::Release);
         debug_assert_eq!(state & (LOCKED | READING), LOCKED);
 
+        // Only try to unpark if there's no QUEUE_LOCKED owner yet and if there's threads queued.
         if state & (QUEUED | QUEUE_LOCKED) == QUEUED {
-            self.unlock_exclusive_slow(state);
+            self.try_unpark();
         }
     }
 
-    #[inline]
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn unlock_exclusive(&self) {
-        if let Err(state) =
-            self.state
-                .compare_exchange(LOCKED, UNLOCKED, Ordering::Release, Ordering::Relaxed)
-        {
-            self.unlock_exclusive_slow(state);
+    #[cold]
+    unsafe fn unlock_shared_and_unpark(&self) {
+        // On x86, we unlock the shared lock first, then try and wake later.
+        // This is faster than using a `lock cmpxchg` loop as it doesn't have
+        // to fail and retry from other threads updating QUEUE_LOCKED bit or queueing themselves.
+        let state = self.state.fetch_sub(LOCKED | READING, Ordering::Release);
+        debug_assert_eq!(state & (LOCKED | READING), LOCKED | READING);
+
+        // Only try to unpark if there's no QUEUE_LOCKED owner yet and if there's threads queued.
+        if state & (QUEUED | QUEUE_LOCKED) == QUEUED {
+            self.try_unpark();
         }
     }
 
-    #[inline]
-    fn try_lock_shared(&self) -> bool {
-        self.try_lock_shared_fast() || self.try_lock_shared_slow()
-    }
-
-    #[inline]
-    fn lock_shared(&self) {
-        if !self.try_lock_shared_fast() {
-            self.lock_shared_slow();
-        }
-    }
-
-    #[inline]
-    unsafe fn unlock_shared(&self) {
+    #[cold]
+    fn try_unpark(&self) {
         let mut state = self.state.load(Ordering::Relaxed);
-        if state == SINGLE_READER {
-            match self.try_unlock_shared_uncontended() {
-                None => {}
-                Some(Ok(_)) => return,
-                Some(Err(e)) => state = e,
-            }
-        }
 
-        self.unlock_shared_slow(state)
-    }
-}
-
-impl RawRwLock {
-    #[inline(always)]
-    fn lock_exclusive_fast_assuming(&self, state: usize) -> bool {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        return {
-            let _ = state;
-            use lock_api::RawRwLock;
-            self.try_lock_exclusive()
-        };
-
-        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-        self.state
-            .compare_exchange_weak(state, state | LOCKED, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    #[cold]
-    fn lock_exclusive_slow(&self) {
-        let is_writer = true;
-        let try_lock = |state: usize| -> Option<bool> {
-            match state & LOCKED {
-                0 => Some(self.lock_exclusive_fast_assuming(state)),
-                _ => None,
-            }
-        };
-
-        self.lock(is_writer, try_lock);
-    }
-
-    #[cold]
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    unsafe fn unlock_exclusive_slow(&self, mut state: usize) {
-        assert_ne!(state & LOCKED, 0);
-        assert_eq!(state & READING, 0);
-        state -= LOCKED;
-
+        // Try to grab the QUEUE_LOCKED bit to wake up threads iff:
+        // - theres no lock holder, as they can be the ones to do the wake up
+        // - there are still threads queued to actually wake up
+        // - the QUEUE_LOCKED bit isnt held as someone is already doing wake up
         while state & (LOCKED | QUEUED | QUEUE_LOCKED) == QUEUED {
             let new_state = state | QUEUE_LOCKED;
             match self.state.compare_exchange_weak(
@@ -180,22 +168,70 @@ impl RawRwLock {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return self.unpark(new_state),
+                Ok(_) => return unsafe { self.unpark(new_state) },
                 Err(e) => state = e,
             }
         }
     }
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+impl RawRwLock {
+    #[inline(always)]
+    fn try_lock_exclusive_assuming(&self, mut state: usize) -> bool {
+        while state & LOCKED == 0 {
+            match self.state.compare_exchange_weak(
+                state,
+                state | LOCKED,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(e) => state = e,
+            }
+        }
+
+        false
+    }
+
+    #[inline(always)]
+    fn try_lock_exclusive_fast(&self) -> bool {
+        self.state
+            .compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    #[inline(always)]
+    unsafe fn unlock_exclusive_fast(&self) {
+        if self
+            .state
+            .compare_exchange(LOCKED, UNLOCKED, Ordering::Release, Ordering::Relaxed)
+            .is_err()
+        {
+            self.unlock_and_unpark();
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn unlock_shared_and_unpark(&self) {
+        self.unlock_and_unpark()
+    }
 
     #[cold]
-    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
-    unsafe fn unlock_exclusive_slow(&self, mut state: usize) {
+    unsafe fn unlock_and_unpark(&self, mut state: usize) {
+        let state = self.state.load(Ordering::Relaxed);
         loop {
             assert_ne!(state & LOCKED, 0);
             assert_ne!(state & QUEUED, 0);
-            assert_eq!(state & READING, 0);
 
+            // Unlocks the rwlock and tries to grab the QUEUE_LOCKED bit for wake up.
             let mut new_state = state & !LOCKED;
             new_state |= QUEUE_LOCKED;
+
+            // Also unset the READING bit if the caller was the last shared owner
+            if state & READING != 0 {
+                new_state &= !READING;
+            }
 
             if let Err(e) = self.state.compare_exchange_weak(
                 state,
@@ -214,7 +250,84 @@ impl RawRwLock {
             return;
         }
     }
+}
 
+//  --- x86 Hardware-Lock-Elision Specializations
+
+#[cfg(all(
+    feature = "hardware-lock-elision",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+impl RawRwLock {
+    #[inline(always)]
+    fn try_lock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
+        Some(unsafe {
+            let mut prev_state: usize;
+            #[cfg(target_pointer_width = "64")]
+            std::arch::asm!(
+                "xacquire lock cmpxchg qword ptr [{0:r}], {1}",
+                in(reg) &self.state,
+                in(reg) SINGLE_READER,
+                inout("rax") UNLOCKED => prev_state,
+                options(nostack),
+            );
+            #[cfg(target_pointer_width = "32")]
+            std::arch::asm!(
+                "xacquire lock cmpxchg dword ptr [{0:e}], {1}",
+                in(reg) &self.state,
+                in(reg) SINGLE_READER,
+                inout("eax") UNLOCKED => prev_state,
+                options(nostack),
+            );
+            match prev_state {
+                UNLOCKED => Ok(prev_state),
+                _ => Err(prev_state),
+            }
+        })
+    }
+
+    #[inline(always)]
+    fn try_unlock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
+        Some(unsafe {
+            let mut prev_state: usize;
+            #[cfg(target_pointer_width = "64")]
+            std::arch::asm!(
+                "xrelease lock cmpxchg qword ptr [{0:r}], {1}",
+                in(reg) &self.state,
+                in(reg) UNLOCKED,
+                inout("rax") SINGLE_READER => prev_state,
+            );
+            #[cfg(target_pointer_width = "32")]
+            std::arch::asm!(
+                "xrelease lock cmpxchg dword ptr [{0:e}], {1}",
+                in(reg) &self.state,
+                in(reg) UNLOCKED,
+                inout("eax") SINGLE_READER => prev_state,
+            );
+            match prev_state {
+                SINGLE_READER => Ok(prev_state),
+                _ => Err(prev_state),
+            }
+        })
+    }
+}
+
+#[cfg(not(feature = "hardware-lock-elision"))]
+impl RawRwLock {
+    #[inline(always)]
+    fn try_lock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
+        None
+    }
+
+    #[inline(always)]
+    fn try_unlock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
+        None
+    }
+}
+
+//  --- Generic Code
+
+impl RawRwLock {
     #[inline(always)]
     fn try_lock_shared_assuming(&self, state: usize) -> Option<Result<usize, usize>> {
         if state == UNLOCKED {
@@ -238,40 +351,6 @@ impl RawRwLock {
     }
 
     #[inline(always)]
-    fn try_lock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
-        #[cfg(all(
-            feature = "hardware-lock-elision",
-            any(target_arch = "x86", target_arch = "x86_64")
-        ))]
-        return Some(unsafe {
-            let mut prev_state: usize;
-            #[cfg(target_pointer_width = "64")]
-            std::arch::asm!(
-                "xacquire lock cmpxchg qword ptr [{0:r}], {1}",
-                in(reg) &self.state,
-                in(reg) SINGLE_READER,
-                inout("rax") UNLOCKED => prev_state,
-                options(nostack),
-            );
-            #[cfg(target_pointer_width = "32")]
-            std::arch::asm!(
-                "xacquire lock cmpxchg dword ptr [{0:e}], {1}",
-                in(reg) &self.state,
-                in(reg) SINGLE_READER,
-                inout("eax") UNLOCKED => prev_state,
-                options(nostack),
-            );
-            match prev_state {
-                UNLOCKED => Ok(prev_state),
-                _ => Err(prev_state),
-            }
-        });
-
-        #[cfg(not(feature = "hardware-lock-elision"))]
-        None
-    }
-
-    #[inline(always)]
     fn try_lock_shared_fast(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
         let result = self.try_lock_shared_assuming(state);
@@ -290,68 +369,38 @@ impl RawRwLock {
         }
     }
 
-    #[cold]
-    fn lock_shared_slow(&self) {
-        let is_writer = false;
-        let try_lock = |state: usize| -> Option<bool> {
-            let result = self.try_lock_shared_assuming(state)?;
-            Some(result.is_ok())
-        };
-
-        self.lock(is_writer, try_lock)
-    }
-
     #[inline(always)]
-    fn try_unlock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
-        #[cfg(all(
-            feature = "hardware-lock-elision",
-            any(target_arch = "x86", target_arch = "x86_64")
-        ))]
-        return Some(unsafe {
-            let mut prev_state: usize;
-            #[cfg(target_pointer_width = "64")]
-            std::arch::asm!(
-                "xrelease lock cmpxchg qword ptr [{0:r}], {1}",
-                in(reg) &self.state,
-                in(reg) UNLOCKED,
-                inout("rax") SINGLE_READER => prev_state,
-            );
-            #[cfg(target_pointer_width = "32")]
-            std::arch::asm!(
-                "xrelease lock cmpxchg dword ptr [{0:e}], {1}",
-                in(reg) &self.state,
-                in(reg) UNLOCKED,
-                inout("eax") SINGLE_READER => prev_state,
-            );
-            match prev_state {
-                SINGLE_READER => Ok(prev_state),
-                _ => Err(prev_state),
-            }
-        });
+    unsafe fn unlock_shared_fast(&self) -> bool {
+        // Just go to the slow path if we're not the only reader
+        let state = self.state.load(Ordering::Relaxed);
+        if state != SINGLE_READER {
+            return false;
+        }
 
-        #[cfg(not(feature = "hardware-lock-elision"))]
-        None
+        // If we support the fast uncontended path, try unlocking with it
+        let result = self.try_unlock_shared_uncontended();
+        matches!(result, Some(Ok(_)))
     }
 
     #[cold]
-    unsafe fn unlock_shared_slow(&self, mut state: usize) {
+    unsafe fn unlock_shared_slow(&self) {
+        let mut state = self.state.load(Ordering::Relaxed);
         while state & QUEUED == 0 {
             assert_ne!(state & LOCKED, 0);
             assert_ne!(state & READING, 0);
             assert_ne!(state >> READER_SHIFT, 0);
 
-            let mut new_state = state - (1 << READER_SHIFT);
             if state == SINGLE_READER {
-                new_state = UNLOCKED;
-
                 match self.try_unlock_shared_uncontended() {
                     None => {}
                     Some(Ok(_)) => return,
-                    Some(Err(e)) => {
-                        state = e;
-                        continue;
-                    }
+                    Some(Err(e)) => state = e,
                 }
+            }
+
+            let mut new_state = state - (1 << READER_SHIFT);
+            if state == SINGLE_READER {
+                new_state = UNLOCKED;
             }
 
             match self.state.compare_exchange_weak(
@@ -375,38 +424,36 @@ impl RawRwLock {
         let readers = tail.as_ref().counter.fetch_sub(1, Ordering::Release);
         assert_ne!(readers, 0);
 
-        if readers > 0 {
-            return;
-        }
-
-        state = self.state.load(Ordering::Relaxed);
-        loop {
-            assert_ne!(state & LOCKED, 0);
-            assert_ne!(state & READING, 0);
-            assert_ne!(state & QUEUED, 0);
-
-            let mut new_state = state & !(LOCKED | READING);
-            new_state |= QUEUE_LOCKED;
-
-            if let Err(e) = self.state.compare_exchange_weak(
-                state,
-                new_state,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                state = e;
-                continue;
-            }
-
-            if state & QUEUE_LOCKED == 0 {
-                self.unpark(new_state);
-            }
-
-            return;
+        if readers == 1 {
+            self.unlock_shared_and_unpark();
         }
     }
 
-    fn lock(&self, is_writer: bool, mut try_lock: impl FnMut(usize) -> Option<bool>) {
+    #[cold]
+    fn lock_exclusive_slow(&self) {
+        let is_writer = true;
+        let try_lock = |state: usize| -> Option<bool> {
+            match state & LOCKED {
+                0 => Some(self.try_lock_exclusive_assuming(state)),
+                _ => None,
+            }
+        };
+
+        self.lock_common(is_writer, try_lock)
+    }
+
+    #[cold]
+    fn lock_shared_slow(&self) {
+        let is_writer = false;
+        let try_lock = |state: usize| -> Option<bool> {
+            let result = self.try_lock_shared_assuming(state)?;
+            Some(result.is_ok())
+        };
+
+        self.lock_common(is_writer, try_lock)
+    }
+
+    fn lock_common(&self, is_writer: bool, mut try_lock: impl FnMut(usize) -> Option<bool>) {
         Waiter::with(|waiter| {
             waiter.waiting_on.set(Some(NonNull::from(self).cast()));
             waiter.flags.set(is_writer as usize);
@@ -469,33 +516,22 @@ impl RawRwLock {
     }
 
     #[cold]
-    pub(super) unsafe fn unpark_requeue(
-        &self,
-        queue_head: NonNull<Waiter>,
-        queue_tail: NonNull<Waiter>,
-    ) {
-        queue_head.as_ref().prev.set(None);
-        queue_head.as_ref().tail.set(None);
-        queue_tail.as_ref().tail.set(None);
-
+    pub(super) unsafe fn unpark_requeue(&self, head: NonNull<Waiter>, tail: NonNull<Waiter>) {
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
             if state & QUEUED == 0 {
                 let readers = state >> READER_SHIFT;
-                queue_tail
-                    .as_ref()
-                    .counter
-                    .store(readers, Ordering::Relaxed);
-                queue_tail.as_ref().tail.set(Some(queue_tail));
-                queue_tail.as_ref().next.set(None);
+                tail.as_ref().counter.store(readers, Ordering::Relaxed);
+                tail.as_ref().tail.set(Some(tail));
+                tail.as_ref().next.set(None);
             } else {
                 let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
                 let head = head.expect("Lock has queued bit without a waiter");
-                queue_tail.as_ref().tail.set(None);
-                queue_tail.as_ref().next.set(Some(head));
+                tail.as_ref().tail.set(None);
+                tail.as_ref().next.set(Some(head));
             }
 
-            let waiter_ptr = queue_head.as_ptr() as usize;
+            let waiter_ptr = head.as_ptr() as usize;
             let new_state = (state & !Waiter::MASK) | waiter_ptr | QUEUED | QUEUE_LOCKED;
 
             if let Err(e) = self.state.compare_exchange_weak(
@@ -600,11 +636,11 @@ impl RawRwLock {
 
             let prev = tail.as_ref().prev.get();
             tail.as_ref().parker.unpark();
-
-            match prev {
-                Some(prev) => tail = prev,
-                None => return,
-            }
+            
+            tail = match prev {
+                Some(prev) => prev,
+                None => break,
+            };
         }
     }
 }
