@@ -247,7 +247,7 @@ impl RawRwLock {
             let mut prev_state: usize;
             #[cfg(target_pointer_width = "64")]
             std::arch::asm!(
-                "xacquire lock cmpxchg qword ptr [{0:r}], {}",
+                "xacquire lock cmpxchg qword ptr [{0:r}], {1}",
                 in(reg) &self.state,
                 in(reg) SINGLE_READER,
                 inout("rax") UNLOCKED => prev_state,
@@ -255,7 +255,7 @@ impl RawRwLock {
             );
             #[cfg(target_pointer_width = "32")]
             std::arch::asm!(
-                "xacquire lock cmpxchg dword ptr [{0:e}], {}",
+                "xacquire lock cmpxchg dword ptr [{0:e}], {1}",
                 in(reg) &self.state,
                 in(reg) SINGLE_READER,
                 inout("eax") UNLOCKED => prev_state,
@@ -311,14 +311,14 @@ impl RawRwLock {
             let mut prev_state: usize;
             #[cfg(target_pointer_width = "64")]
             std::arch::asm!(
-                "xrelease lock cmpxchg qword ptr [{0:r}], {}",
+                "xrelease lock cmpxchg qword ptr [{0:r}], {1}",
                 in(reg) &self.state,
                 in(reg) UNLOCKED,
                 inout("rax") SINGLE_READER => prev_state,
             );
             #[cfg(target_pointer_width = "32")]
             std::arch::asm!(
-                "xrelease lock cmpxchg dword ptr [{0:e}], {}",
+                "xrelease lock cmpxchg dword ptr [{0:e}], {1}",
                 in(reg) &self.state,
                 in(reg) UNLOCKED,
                 inout("eax") SINGLE_READER => prev_state,
