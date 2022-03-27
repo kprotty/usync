@@ -8,7 +8,7 @@
 // mod barrier;
 mod condvar;
 mod mutex;
-// mod once;
+mod once;
 mod reentrant_mutex;
 mod rwlock;
 mod shared;
@@ -25,7 +25,7 @@ pub use self::{
     // barrier::{Barrier, BarrierWaitResult},
     condvar::{Condvar, WaitTimeoutResult},
     mutex::{const_mutex, MappedMutexGuard, Mutex, MutexGuard, RawMutex},
-    // once::{Once, OnceState},
+    once::{Once, OnceState},
     reentrant_mutex::{
         const_reentrant_mutex, MappedReentrantMutexGuard, ReentrantMutex, ReentrantMutexGuard,
     },

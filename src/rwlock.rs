@@ -636,7 +636,7 @@ impl RawRwLock {
 
             let prev = tail.as_ref().prev.get();
             tail.as_ref().parker.unpark();
-            
+
             tail = match prev {
                 Some(prev) => prev,
                 None => break,
