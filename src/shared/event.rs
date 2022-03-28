@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// The primary blocking primitive used by all the synchronization data structures.
 pub(super) struct Event {
     thread: Cell<Option<thread::Thread>>,
     is_set: AtomicBool,
@@ -23,6 +24,7 @@ impl Event {
     }
 
     pub(super) fn with<F>(f: impl FnOnce(Pin<&Self>) -> F) -> F {
+        // SAFETY: The event lives on the thread's stack.
         let event = Self::new();
         event.thread.set(Some(thread::current()));
         f(unsafe { Pin::new_unchecked(&event) })
@@ -32,6 +34,8 @@ impl Event {
     pub(super) fn wait(self: Pin<&Self>, timeout: Option<Duration>) -> bool {
         let mut started = None;
         loop {
+            // Returns true when the event is set.
+            // Acquire barrier ensures that the set() happens before we return.
             if self.is_set.load(Ordering::Acquire) {
                 return true;
             }
@@ -39,10 +43,12 @@ impl Event {
             match timeout {
                 None => thread::park(),
                 Some(timeout) => {
+                    // Get the current time and lazily compute when we started waiting.
                     let now = Instant::now();
                     let start = started.unwrap_or_else(|| Instant::now());
                     started = Some(start);
 
+                    // Check if we've been waiting for longer than the timeout
                     let elapsed = now - start;
                     match timeout.checked_sub(elapsed) {
                         Some(until_timeout) => thread::park_timeout(until_timeout),

@@ -192,9 +192,9 @@ impl Once {
                     fence(Ordering::Acquire);
                     return;
                 }
-                
+
                 // Check for poision and panic if the caller can't ignore it.
-                // Acquire barrier to ensure the Once function call panic happened before we return. 
+                // Acquire barrier to ensure the Once function call panic happened before we return.
                 if state == POISONED && !ignore_poison {
                     fence(Ordering::Acquire);
                     panic!("Once instance was previously poisoned");
@@ -204,7 +204,7 @@ impl Once {
                 // Queue our waiter in order to wait for them to finish calling.
                 if state & 0b11 == CALLING {
                     // Try to spin a little bit in hopes that they finish the function call soon.
-                    // Don't spin if there's already threads waiting as we should start waiting too. 
+                    // Don't spin if there's already threads waiting as we should start waiting too.
                     let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
                     if head.is_none() && spin.try_yield_now() {
                         state = self.state.load(Ordering::Relaxed);
@@ -227,7 +227,7 @@ impl Once {
                         state = e;
                         continue;
                     }
-                    
+
                     // Sleep and check the Once state again.
                     assert!(waiter.parker.park(None));
                     state = self.state.load(Ordering::Relaxed);
@@ -263,7 +263,7 @@ impl Once {
             fn drop(&mut self) {
                 // Complete the once state using the reset_to.
                 // AcqRel as Acquire to ensure writes to pushed waiters happen before we iterate and wake them below.
-                // AcqRel as Release to ensure our function call happens before the waiters return from call_once_*. 
+                // AcqRel as Release to ensure our function call happens before the waiters return from call_once_*.
                 let state = self.once.state.swap(self.reset_to, Ordering::AcqRel);
                 assert_eq!(state & 0b11, CALLING);
 
@@ -290,7 +290,7 @@ impl Once {
             _ => unreachable!("invalid once state on invokation"),
         });
 
-        // The function call completed safely, 
+        // The function call completed safely,
         // so resolve the Once with COMPLETED instead of POISONED.
         state_guard.reset_to = COMPLETED;
         std::mem::drop(state_guard);
