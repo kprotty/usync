@@ -2,6 +2,7 @@ use super::RawRwLock;
 use lock_api::RawRwLock as _RawRwLock;
 use std::fmt;
 
+/// Raw mutex type implemented with lock-free userspace thread queues.
 #[derive(Default)]
 #[repr(transparent)]
 pub struct RawMutex {

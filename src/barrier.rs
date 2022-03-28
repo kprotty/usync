@@ -40,6 +40,24 @@ const COUNT_SHIFT: u32 = QUEUED.trailing_zeros();
 /// ```
 #[derive(Default)]
 pub struct Barrier {
+    /// This atomic integer holds the current state of the Barrier instance.
+    /// The QUEUED bit switches between counting the barrier value and recording the waiters.
+    ///
+    /// # State table:
+    ///
+    /// QUEUED | QUEUE_LOCKED | Remaining | Description
+    ///    0   |      0       |     0     | The barrier was completed and wait()s will return without blocking.
+    /// -------+--------------+-----------+----------------------------------------------------------------------
+    ///    0   |      barrier count       | The barrier was initialized with a barrier count and has no waiting threads.
+    /// -------+--------------+-----------+----------------------------------------------------------------------
+    ///    1   |      0       |  *Waiter  | The barrier has waiting threads where the head of the queue is in Remaining bits.
+    ///        |              |           | The barrier count was moved to the tail of the waiting-threads queue.
+    /// -------+--------------+-----------+----------------------------------------------------------------------
+    ///    1   |      1       |  *Waiter  | The barrier has waiting threads where the head of the queue is in Remaining bits.
+    ///        |              |           | There is also a thread updating the waiting-threads queue.
+    ///        |              |           | Said thread is counting how many threads are queued and may possibly
+    ///        |              |           | complete the barrier if the amount waiting matches or goes above the barrier count.
+    /// -------+--------------+-----------+----------------------------------------------------------------------
     state: AtomicUsize,
     _p: PhantomData<*const Waiter>,
 }
@@ -113,8 +131,10 @@ impl Barrier {
     #[inline]
     pub fn wait(&self) -> BarrierWaitResult {
         let mut is_leader = false;
-        let state = self.state.load(Ordering::Acquire);
 
+        // Quick check if the Barrier was already completed.
+        // Acquire barrier to ensure Barrier completions happens before we return.
+        let state = self.state.load(Ordering::Acquire);
         if state != COMPLETED {
             is_leader = self.wait_slow(state);
         }
@@ -129,11 +149,17 @@ impl Barrier {
             waiter.prev.set(None);
 
             loop {
+                // If the queue became completed, return that we are not the leader.
+                // Acqire barrier to ensure the queue completion happens before we return.
                 if state == COMPLETED {
                     fence(Ordering::Acquire);
                     return false;
                 }
 
+                // Special case to complete the queue if there's only an n=1.
+                // This avoids going throught the queue + QUEUE_LOCKED case below.
+                // On success, returns true for being the leader as we completed the Barrier.
+                // Release barrier ensures the Barrier completions happens before waiting threads return.
                 if state == (1 << COUNT_SHIFT) {
                     match self.state.compare_exchange_weak(
                         state,
@@ -147,24 +173,37 @@ impl Barrier {
                     continue;
                 }
 
+                // Prepare the waiter to be queued onto the state.
+                // NOTE: Don't keep the non Waiter::MASK bits!
+                //       The first queued waiter will have the counter in those bits.
                 let waiter_ptr = &*waiter as *const Waiter as usize;
                 let mut new_state = waiter_ptr | QUEUED;
 
                 if state & QUEUED == 0 {
+                    // If we're the first waiter, we move the counter to our node.
+                    // We also subtract one from the counter to *account* (pun) for our waiting thread.
                     let counter = (state >> COUNT_SHIFT)
                         .checked_sub(1)
                         .expect("Barrier counter with zero value when waiting");
 
+                    // The first waiter also sets the tail to itself
+                    // so that Waiter::get_and_link_queue() can find the queue tail.
                     waiter.counter.store(counter, Ordering::Relaxed);
                     waiter.next.set(None);
                     waiter.tail.set(Some(NonNull::from(&*waiter)));
                 } else {
+                    // Other waiters push to the queue in a stack-like manner.
+                    // They also try to grab the QUEUE_LOCKED bit in order to fix/link the queue
+                    // and possibly complete the Barrier in the process (depending on how many waiters there are).
                     let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
                     new_state |= QUEUE_LOCKED;
                     waiter.next.set(head);
                     waiter.tail.set(None);
                 }
 
+                // Release barrier synchronizes with Acquire barrier by the QUEUE_LOCKED bit holder
+                // doing Waiter::get_and_link_queue() to ensure that it sees the waiter writes we did
+                // above when observing the state.
                 if let Err(e) = self.state.compare_exchange_weak(
                     state,
                     new_state,
@@ -175,14 +214,20 @@ impl Barrier {
                     continue;
                 }
 
+                // If we acquired the QUEUE_LOCKED bit, try to link the queue or complete the Barrier.
+                // NOTE: The bits must be checked separately!
+                //       When the counter is still there, it could pose as a QUEUE_LOCKED bit.
                 if (state & QUEUED != 0) && (state & QUEUE_LOCKED == 0) {
+                    // If we manage to complete the Barrier, return is_leader=true here.
+                    // SAFETY: we hold the QUEUE_LOCKED bit now.
                     if unsafe { self.link_queue_or_complete(new_state) } {
                         return true;
                     }
                 }
 
+                // Wait until we're woken up with the barrier completed.
                 assert!(waiter.parker.park(None));
-                debug_assert_eq!(self.state.load(Ordering::Relaxed), COMPLETED);
+                assert_eq!(self.state.load(Ordering::Acquire), COMPLETED);
                 return false;
             }
         })
@@ -194,18 +239,28 @@ impl Barrier {
             assert_ne!(state & QUEUED, 0);
             assert_ne!(state & QUEUE_LOCKED, 0);
 
-            let mut discovered = 0;
+            // Fix the prev links in the waiter queue now that we hold the QUEUE_LOCKED bit.
+            // Also track how many waiters we discovered while trying to fix the waiter links.
+            // Acquire barrier to ensure writes to waiters pushed to the queue happen before we start fixing it.
             fence(Ordering::Acquire);
+            let mut discovered = 0;
             let (_, tail) = Waiter::get_and_link_queue(state, |_| discovered += 1);
 
+            // The barrier count is stored at the tail.
+            // Subtract the amount of newly discovered nodes from the count.
+            // Use saturating_sub() as technically more threads than the count could try to wait().
             let mut counter = tail.as_ref().counter.load(Ordering::Relaxed);
             counter = counter.saturating_sub(discovered);
 
+            // When the count hits zero, complete the barrier.
             tail.as_ref().counter.store(counter, Ordering::Relaxed);
             if counter == 0 {
                 return self.complete();
             }
 
+            // The barrier count isnt zero yet.
+            // Unset the QUEUE_LOCKED bit since we've updated the queue links for the next wait()'er to grab it.
+            // Release barrier ensures the waiter writes to head/tail we did above happen before the next QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
                 state & !QUEUE_LOCKED,
@@ -220,6 +275,9 @@ impl Barrier {
 
     #[cold]
     unsafe fn complete(&self) -> bool {
+        // Complete the barrier while also dequeueing all the waiters.
+        // AcqRel as Acquire barrier to ensure the writes to the pushed waiters happens before we iterate & wake them below.
+        // AcqRel as Release barrier to ensure that the barrier completion happens before the wait() calls return.
         let state = self.state.swap(COMPLETED, Ordering::AcqRel);
         assert_ne!(state & QUEUED, 0);
         assert_ne!(state & QUEUE_LOCKED, 0);
@@ -230,6 +288,7 @@ impl Barrier {
             waiter.as_ref().parker.unpark();
         }
 
+        // Since we completed the barrier, we are the leader.
         true
     }
 }

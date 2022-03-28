@@ -16,9 +16,42 @@ const QUEUE_LOCKED: usize = 8;
 const READER_SHIFT: u32 = 16usize.trailing_zeros();
 const SINGLE_READER: usize = LOCKED | READING | (1 << READER_SHIFT);
 
+/// Raw rwlock type implemented with lock-free userspace thread queues.
 #[derive(Default)]
 #[repr(transparent)]
 pub struct RawRwLock {
+    /// This atomic integer holds the current state of the rwlock instance.
+    /// The four least significant bits are used to track the different states of the RwLock.
+    ///
+    /// # State table:
+    ///
+    /// LOCKED | READING | QUEUED | QUEUE_LOCKED | Remaining | Description
+    ///    0   |    0    |   0    |      0       |     0     | The RwLock is unlocked and in an empty state.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
+    ///    1   |    0    |   0    |      0       |     0     | One writer holds the lock and there are no waiting threads.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
+    ///    1   |    0    |   1    |      0       |  *Waiter  | One writer holds the lock and the Remaining bits point to
+    ///        |         |        |              |           | the head Waiter node of the waiting-thread queue.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
+    ///    1   |    0    |   1    |      1       |  *Waiter  | One writer holds the lock and the Remaining bits point to
+    ///        |         |        |              |           | the head Waiter node of the waiting thread queue. There is
+    ///        |         |        |              |           | also a thread which is updating the waiting-thread queue.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
+    ///    0   |    0    |   1    |      1       |  *Waiter  | The rwlock is not held, but there are waiting threads.
+    ///        |         |        |              |           | There is also one thread which is trying to dequeue and
+    ///        |         |        |              |           | wake up a thread from the waiting-thread queue.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
+    ///    1   |    1    |   0    |      0       |     n     | `n` readers hold the lock and there are no waiting threads.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
+    ///    1   |    1    |   0    |      1       |  *Waiter  | The lock is held by readers and the Remaining bits point to
+    ///        |         |        |              |           | the head Waiter node of the waiting thread queue. The reader
+    ///        |         |        |              |           | count has also been moved to the `counter` field on the tail
+    ///        |         |        |              |           | node of the waiting-thread queue.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
+    ///    1   |    1    |   1    |      1       |  *Waiter  | The lock is held by readers and the remaining bits point to
+    ///        |         |        |              |           | the head Waiter node of the waiting thread queue. There is
+    ///        |         |        |              |           | also a thread which is updating the waiting-thread queue.
+    /// -------+---------+--------+--------------+-----------+-------------------------------------------------------------
     pub(super) state: AtomicUsize,
     _p: PhantomData<*const Waiter>,
 }
@@ -258,12 +291,18 @@ impl RawRwLock {
 impl RawRwLock {
     #[inline(always)]
     fn try_lock_shared_assuming(&self, state: usize) -> Option<Result<usize, usize>> {
+        // Returns None if the lock is held by a writer
         if state != UNLOCKED {
             if state & (LOCKED | READING | QUEUED) != (LOCKED | READING) {
                 return None;
             }
         }
 
+        // Check for reader count overflow when trying to add a reader.
+        // On overflow, readers will queue themselves and be woken up by the last active reader.
+        // Overflow is very unlikely though as it requires `usize::MAX >> 4` active readers at once.
+        // On a system where `usize` is 64 bits, that's over a quintillion (1 million ^ 5) readers.
+        // On a system where `usize` is 32 bits, that's still over 260 million readers.
         if let Some(with_reader) = state.checked_add(1 << READER_SHIFT) {
             return Some(self.state.compare_exchange_weak(
                 state,
@@ -304,12 +343,20 @@ impl RawRwLock {
         }
 
         self.state
-            .compare_exchange(SINGLE_READER, UNLOCKED, Ordering::Release, Ordering::Relaxed)
+            .compare_exchange(
+                SINGLE_READER,
+                UNLOCKED,
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
             .is_ok()
     }
 
     #[cold]
     unsafe fn unlock_shared_slow(&self) {
+        // Try to just bump the reader count down when there's no waiting threads.
+        // This only works because the Remaining bits still point to the reader count.
+        // When threads start waiting, they override these bits with the queue pointer.
         let mut state = self.state.load(Ordering::Relaxed);
         while state & QUEUED == 0 {
             assert_ne!(state & LOCKED, 0);
@@ -332,17 +379,29 @@ impl RawRwLock {
             }
         }
 
+        // The'ers threads waiting on the RwLock.
+        // The reader count has moved to the tail of the queue.
         assert_ne!(state & LOCKED, 0);
         assert_ne!(state & QUEUED, 0);
         assert_ne!(state & READING, 0);
 
+        // Find the tail of the wait queue while also caching it at the current head.
+        // As long as the Waiter writes are atomic, this can be soundly racing with
+        // other callers to get_and_link_queue() like link_queue_or_unpark() or other readers.
+        // Acquire barrier to ensure Waiter queue writes to head happen before we start scanning.
         fence(Ordering::Acquire);
         let (_head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
+        // Decrement the reader count which was moved to the tail.
+        // Release barrier to ensure RwLock-protected reads/loads happen before we "release" the read lock.
         let readers = tail.as_ref().counter.fetch_sub(1, Ordering::Release);
         assert_ne!(readers, 0);
 
+        // The last reader unsets the LOCKED bit and tries to wake up waiting threads.
+        // Acquire barrier synchronizes with the Release to counter above to ensure
+        // that the unsetting of the LOCKED bit happens after all the readers reads/loads occur.
         if readers == 1 {
+            fence(Ordering::Acquire);
             self.unlock_shared_and_unpark();
         }
     }
@@ -380,6 +439,8 @@ impl RawRwLock {
             loop {
                 let mut state = self.state.load(Ordering::Relaxed);
                 loop {
+                    // Try to acquire the RwLock.
+                    // On failure, spins a bit to decrease cache-line contension.
                     let mut backoff = SpinWait::default();
                     while let Some(was_locked) = try_lock(state) {
                         if was_locked {
@@ -390,6 +451,9 @@ impl RawRwLock {
                         state = self.state.load(Ordering::Relaxed);
                     }
 
+                    // We can't acquire the RwLock at the moment.
+                    // Try to spin for a little in hopes the RwLock is released quickly.
+                    // Also don't spin if threads are waiting as we should start waiting too.
                     if (state & QUEUED == 0) && spin.try_yield_now() {
                         state = self.state.load(Ordering::Relaxed);
                         continue;
@@ -414,9 +478,12 @@ impl RawRwLock {
 
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
+            // Don't requeue if the waiter (which is a writer) could acquire the lock.
             if state & LOCKED == 0 {
                 return false;
             }
+
+            // Returns true when this waiter is requeued
             if self.try_queue(&mut state, waiter.as_ref()) {
                 return true;
             }
@@ -424,23 +491,36 @@ impl RawRwLock {
     }
 
     unsafe fn try_queue(&self, state: &mut usize, waiter: Pin<&Waiter>) -> bool {
-        waiter.prev.set(None);
-        
+        // Prepare to push our waiter to the head of the wait queue.
         let waiter_ptr = &*waiter as *const Waiter as usize;
         let mut new_state = (*state & !Waiter::MASK) | waiter_ptr | QUEUED;
 
         if *state & QUEUED == 0 {
+            // The first queued waiter will be the tail and it now needs to
+            // track the readers since its overriding the remaining state bits.
             let readers = *state >> READER_SHIFT;
             waiter.counter.store(readers, Ordering::Relaxed);
+
+            // The first queued waiter also sets its `tail` field to itself.
+            // This allows `Waiter::get_and_link_queue` to eventually find the queue tail.
+            waiter.prev.set(None);
             waiter.next.set(None);
             waiter.tail.set(Some(NonNull::from(&*waiter)));
         } else {
+            // The thread which holds the QUEUE_LOCKED bit, or active read-lock holders, will update the queue.
+            // Since there's multiple waiting threads now, try to grab the QUEUE_LOCKED bit in order to update the queue.
             let head = NonNull::new((*state & Waiter::MASK) as *mut Waiter);
             new_state |= QUEUE_LOCKED;
+
+            // Other waiters will link themselves onto the waiter queue in a stack-like fashion;
+            // Leaving the `tail` field unset for Waiter::get_and_link_queue() to traverse and cache the found tail.
+            waiter.prev.set(None);
             waiter.next.set(head);
             waiter.tail.set(None);
         }
 
+        // Release barrier synchronizes with Acquire barrier by threads doing Waiter::get_and_link_queue()
+        // to ensure that those threads see the waiter writes we did above when observing the state.
         if let Err(e) = self.state.compare_exchange_weak(
             *state,
             new_state,
@@ -464,13 +544,21 @@ impl RawRwLock {
             assert_ne!(state & QUEUED, 0);
             assert_ne!(state & QUEUE_LOCKED, 0);
 
+            // If the lock holders released the lock,
+            // we are now in charge of waking up threads since we hold the QUEUE_LOCKED bit.
+            // This is due to the lock-releasing thread skipping thread-wakeup
+            // if the QUEUE_LOCKED bit is set as we can take over its job.
             if state & LOCKED == 0 {
                 return self.unpark(state);
             }
 
+            // Fix the prev links in the waiter queue now that we hold the QUEUE_LOCKED bit.
+            // Acquire barrier to ensure writes to waiters pushed to the queue happen before we start fixing it.
             fence(Ordering::Acquire);
             let _ = Waiter::get_and_link_queue(state, |_| {});
 
+            // Finally, try to the release the QUEUE_LOCKED bit.
+            // Release barrier to ensure the writes we did above happen before the next QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
                 state & !QUEUE_LOCKED,
@@ -489,6 +577,10 @@ impl RawRwLock {
             assert_ne!(state & QUEUED, 0);
             assert_ne!(state & QUEUE_LOCKED, 0);
 
+            // If the RwLock is locked by another thread while we're trying to wake one up,
+            // then bail by releasing the QUEUE_LOCKED bit as the lock holder can do the wake up instead.
+            // Release barrier to ensure the queue writes we've possibly done so far in Waiter::get_and_link_queue()
+            // below happen before the next QUEUE_LOCKED bit holder.
             if state & LOCKED != 0 {
                 match self.state.compare_exchange_weak(
                     state,
@@ -502,20 +594,40 @@ impl RawRwLock {
                 continue;
             }
 
+            // Fix and get the ends of the wait queue in order to wake the tail up.
+            // Acquire barrier ensures that writes to waiters pushed to the queue
+            // happen before we start fixing/getting it.
             fence(Ordering::Acquire);
             let (head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
+            // If the tail (the waiter to wake up) is a writer,
+            // then we can just wake up that one and leave the rest queued.
             let is_writer = tail.as_ref().flags.get() != 0;
             if is_writer {
+                // We only leave the reset queued if there is a "rest" to begin with.
                 if let Some(new_tail) = tail.as_ref().prev.get() {
+                    // The tail is dequeued by updating the cached head references to it with the new tail.
+                    // Unset the QUEUE_LOCKED bit now that we have dequeued the tail for waking.
+                    // Release barrier ensures the head/tail updates happen before the next QUEUE_LOCKED bit owner.
                     head.as_ref().tail.set(Some(new_tail));
                     self.state.fetch_and(!QUEUE_LOCKED, Ordering::Release);
 
+                    // unpark_waiters() follows the queue backwards from the tail to the head using the `prev` field.
+                    // Since we queue to the head, we dequeue from the tail.
+                    // Given we're only taking up the tail, zero out its `prev` field.
                     tail.as_ref().prev.set(None);
                     return self.unpark_waiters(tail);
                 }
             }
 
+            // The tail of the wait queue is a reader (not a writer).
+            //
+            // parking_lot would normally scan backwards from the tail to find all readers until the first writer for wakeup.
+            // The queue in most cases is generally small, so we can afford just waking everyone up instead
+            // with the assumption that they're all readers.
+            //
+            // To do that, we must zero out the queue portion of the state while also releasing the QUEUE_LOCKED bit.
+            // Release barrier ensures the head/tail access above happen before we release the QUEUE_LOCKED bit before wake up.
             match self.state.compare_exchange_weak(
                 state,
                 state & !(Waiter::MASK | QUEUED | QUEUE_LOCKED),

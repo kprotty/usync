@@ -12,7 +12,7 @@ use std::{
 const EMPTY: usize = 0;
 const SIGNAL: usize = 1;
 const SIGNAL_MASK: usize = 0b111;
-const SIGNAL_LOCKED: usize = SIGNAL_MASK + 1;
+const QUEUE_LOCKED: usize = SIGNAL_MASK + 1;
 
 /// A Condition Variable
 ///
@@ -71,6 +71,28 @@ const SIGNAL_LOCKED: usize = SIGNAL_MASK + 1;
 /// ```
 #[derive(Default)]
 pub struct Condvar {
+    /// This atomic integer holds the current state of the Condvar instance.
+    /// The four least significant bits are used to notify_one calls and the state of the Condvar.
+    ///
+    /// # State table:
+    ///
+    /// SIGNAL_MASK | QUEUE_LOCKED | Remaining | Description
+    ///       0     |       0       |     0     | The condvar is empty and there's nothing waiting on it.
+    /// ------------+---------------+-----------+-----------------------------------------------------------------
+    ///       0     |       0       |  *Waiter  | The Remaining bits point to the head Waiter node of the
+    ///             |               |           | waiting thread queue.
+    /// ------------+---------------+-----------+-----------------------------------------------------------------
+    ///       0     |       1       |  *Waiter  | The Remaining bits point to the head Waiter node of the
+    ///             |               |           | waiting thread queue. There is also a thread which is
+    ///             |               |           | updating the waiting-thread queue and possibly waking from it.
+    /// ------------+---------------+-----------+-----------------------------------------------------------------
+    ///      n>0    |       1       |  *Waiter  | The Remaining bits point to the head Waiter node of the
+    ///             |               |           | waiting thread queue. There is also a thread which is
+    ///             |               |           | updating the waiting-thread queue and waking from it.
+    ///             |               |           | `n` is the amount of `notify_one` calls that happened since the
+    ///             |               |           | QUEUE_LOCKED bit was taken for waiting-thread queue updating/waking.
+    //              |               |           | If `n == SIGNAL_MASK` then all threads in the queue are woken up.
+    /// ------------+---------------+-----------+-----------------------------------------------------------------
     state: AtomicUsize,
     _p: PhantomData<*const Waiter>,
 }
@@ -85,6 +107,8 @@ unsafe impl Send for Condvar {}
 unsafe impl Sync for Condvar {}
 
 impl Condvar {
+    /// Creates a new condition variable which is ready to be waited on and
+    /// notified.
     pub const fn new() -> Self {
         Self {
             state: AtomicUsize::new(EMPTY),
@@ -92,11 +116,37 @@ impl Condvar {
         }
     }
 
+    /// Blocks the current thread until this condition variable receives a
+    /// notification.
+    ///
+    /// This function will atomically unlock the mutex specified (represented by
+    /// `mutex_guard`) and block the current thread. This means that any calls
+    /// to `notify_*()` which happen logically after the mutex is unlocked are
+    /// candidates to wake this thread up. When this function call returns, the
+    /// lock specified will have been re-acquired.
     pub fn wait<T: ?Sized>(&self, mutex_guard: &mut MutexGuard<'_, T>) {
         let result = self.wait_with(mutex_guard, None);
         assert!(!result.timed_out());
     }
 
+    /// Waits on this condition variable for a notification, timing out after
+    /// the specified time instant.
+    ///
+    /// The semantics of this function are equivalent to `wait()` except that
+    /// the thread will be blocked roughly until `timeout` is reached. This
+    /// method should not be used for precise timing due to anomalies such as
+    /// preemption or platform differences that may not cause the maximum
+    /// amount of time waited to be precisely `timeout`.
+    ///
+    /// Note that the best effort is made to ensure that the time waited is
+    /// measured with a monotonic clock, and not affected by the changes made to
+    /// the system time.
+    ///
+    /// The returned `WaitTimeoutResult` value indicates if the timeout is
+    /// known to have elapsed.
+    ///
+    /// Like `wait`, the lock specified will be re-acquired when this function
+    /// returns, regardless of whether the timeout elapsed or not.
     pub fn wait_until<T: ?Sized>(
         &self,
         mutex_guard: &mut MutexGuard<'_, T>,
@@ -108,6 +158,24 @@ impl Condvar {
         }
     }
 
+    /// Waits on this condition variable for a notification, timing out after a
+    /// specified duration.
+    ///
+    /// The semantics of this function are equivalent to `wait()` except that
+    /// the thread will be blocked for roughly no longer than `timeout`. This
+    /// method should not be used for precise timing due to anomalies such as
+    /// preemption or platform differences that may not cause the maximum
+    /// amount of time waited to be precisely `timeout`.
+    ///
+    /// Note that the best effort is made to ensure that the time waited is
+    /// measured with a monotonic clock, and not affected by the changes made to
+    /// the system time.
+    ///
+    /// The returned `WaitTimeoutResult` value indicates if the timeout is
+    /// known to have elapsed.
+    ///
+    /// Like `wait`, the lock specified will be re-acquired when this function
+    /// returns, regardless of whether the timeout elapsed or not.
     pub fn wait_for<T: ?Sized>(
         &self,
         mutex_guard: &mut MutexGuard<'_, T>,
@@ -123,15 +191,18 @@ impl Condvar {
         timeout: Option<Duration>,
     ) -> WaitTimeoutResult {
         Waiter::with(|waiter| unsafe {
+            // MutexGuard acquired the internal RawRwLock as a writer
             let is_writer = true;
             waiter.flags.set(is_writer as usize);
 
+            // RawMutex is just a wrapper around RawRwLock.
             let raw_mutex = MutexGuard::mutex(mutex_guard).raw();
             let raw_rwlock = NonNull::from(&raw_mutex.rwlock);
 
             waiter.waiting_on.set(Some(raw_rwlock.cast()));
             waiter.prev.set(None);
 
+            // Push our waiter to the wait queue and report if we acquired the QUEUE_LOCKED bit
             let mut state = self.state.load(Ordering::Relaxed);
             let signal_locked = loop {
                 let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
@@ -140,42 +211,111 @@ impl Condvar {
                 let waiter_ptr = &*waiter as *const Waiter as usize;
                 let mut new_state = (state & !Waiter::MASK) | waiter_ptr;
 
+                // If we're the first waiter, set our tail to be ourselves.
+                // This allows Waiter::get_and_link_queue() to found our tail.
+                // If we're not the first waiter, try to acquire the QUEUE_LOCKED bit to link the queue.
                 if head.is_some() {
                     waiter.tail.set(None);
-                    new_state |= SIGNAL_LOCKED;
+                    new_state |= QUEUE_LOCKED;
                 } else {
                     waiter.tail.set(Some(NonNull::from(&*waiter)));
                 }
 
+                // Release barrier to ensure that our waiter writes above
+                // happen before the QUEUE_LOCKED bit holder operates on the queue visible from state.
                 match self.state.compare_exchange_weak(
                     state,
                     new_state,
                     Ordering::Release,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => break head.is_some() && (state & SIGNAL_LOCKED == 0),
+                    Ok(_) => break head.is_some() && (state & QUEUE_LOCKED == 0),
                     Err(e) => state = e,
                 }
             };
 
+            // Now that our waiter is registered on the state,
+            // unlock the mutex in order to block the thread.
             raw_mutex.unlock();
 
+            // Make sure to link and unset the QUEUE_LOCKED
             if signal_locked {
                 state = self.state.load(Ordering::Relaxed);
                 self.link_queue_or_unpark(state);
             }
 
+            // Block the thread and wait for a wake up or timeout.
             let timed_out = !waiter.parker.park(timeout);
+
+            // On timeout, we must ensure that our waiter is no longer in the waiting-thread queue.
+            // We could try to grab the QUEUE_LOCKED bit and remove ourselves, but it's not guaranteed
+            // that we're still in the waiting-thread queue; We could have been requeued to the RawRWLock.
+            // Instead, just wake everything up and wait for our waiter specifically to be woken up.
             if timed_out {
                 self.notify_all();
                 assert!(waiter.parker.park(None));
             }
 
+            // Re-acquire the mutex/rwlock and return whether we timed out.
             raw_mutex.lock();
             WaitTimeoutResult(timed_out)
         })
     }
 
+    #[cold]
+    unsafe fn link_queue_or_unpark(&self, mut state: usize) {
+        loop {
+            assert_ne!(state & QUEUE_LOCKED, 0);
+
+            // If `notify_*` calls occured while we we're trying to link the queue,
+            // then we are now responsible for doing the wake up from the notifications.
+            let signals = state & SIGNAL_MASK;
+            if signals > 0 {
+                return self.unpark(state, 0);
+            }
+
+            // Fix the prev links in the waiter queue now that we hold the QUEUE_LOCKED bit.
+            // Acquire barrier to ensure writes to waiters pushed to the queue happen before we start fixing it.
+            fence(Ordering::Acquire);
+            let _ = Waiter::get_and_link_queue(state, |_| {});
+
+            // Finally, try to the release the QUEUE_LOCKED bit.
+            // Release barrier to ensure the writes we did above happen before the next QUEUE_LOCKED bit holder.
+            match self.state.compare_exchange_weak(
+                state,
+                state & !QUEUE_LOCKED,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(e) => state = e,
+            }
+        }
+    }
+
+    /// Wakes up one blocked thread on this condvar.
+    ///
+    /// Returns **a hint** as to whether a thread was woken up.
+    ///
+    /// If there is a blocked thread on this condition variable, then it will
+    /// be woken up from its call to `wait` or `wait_timeout`. Calls to
+    /// `notify_one` are not buffered in any way *to subsequent waiters*.
+    ///
+    /// To wake up all threads, see `notify_all()`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use usync::Condvar;
+    ///
+    /// let condvar = Condvar::new();
+    ///
+    /// // do something with condvar, share it with other threads
+    ///
+    /// if !condvar.notify_one() {
+    ///     println!("Nobody was listening for this.");
+    /// }
+    /// ```
     #[inline]
     pub fn notify_one(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
@@ -193,9 +333,9 @@ impl Condvar {
                 return false;
             }
 
-            if state & SIGNAL_LOCKED == 0 {
-                // Try to acquire the signal lock to wake up the queued threads.
-                let new_state = state | SIGNAL_LOCKED;
+            if state & QUEUE_LOCKED == 0 {
+                // Try to acquire the QUEUE_LOCKED bit to wake up the queued threads.
+                let new_state = state | QUEUE_LOCKED;
                 if let Err(e) = self.state.compare_exchange_weak(
                     state,
                     new_state,
@@ -216,7 +356,9 @@ impl Condvar {
                 return false;
             }
 
-            // Tell the signal lock holder to wake up the thread in our place.
+            // Tell the QUEUE_LOCKED bit holder to wake up the thread in our place.
+            // Release barrier to ensure this notify_one() happens before
+            // the wake ups done by the QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
                 state + SIGNAL,
@@ -229,6 +371,15 @@ impl Condvar {
         }
     }
 
+    /// Wakes up all blocked threads on this condvar.
+    ///
+    /// Returns **a hint** as to whether threads were woken up.
+    ///
+    /// This method will ensure that any current waiters on the condition
+    /// variable are awoken. Calls to `notify_all()` are not buffered in any
+    /// way *to subsequent waiters*.
+    ///
+    /// To wake up only one thread, see `notify_one()`.
     #[inline]
     pub fn notify_all(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
@@ -247,7 +398,8 @@ impl Condvar {
             }
 
             // If no thread is currently waking up the waiters, grab all of them to wake up.
-            if state & SIGNAL_LOCKED == 0 {
+            // Acquire barrier to ensure writes to pushed waiters happen before we start waking them up.
+            if state & QUEUE_LOCKED == 0 {
                 if let Err(e) = self.state.compare_exchange_weak(
                     state,
                     EMPTY,
@@ -267,6 +419,9 @@ impl Condvar {
                 return false;
             }
 
+            // Tell the QUEUE_LOCKED bit holder to wake up all threads in our place.
+            // Release barrier to ensure this notify_one() happens before
+            // the wake ups done by the QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
                 state | SIGNAL_MASK,
@@ -280,51 +435,32 @@ impl Condvar {
     }
 
     #[cold]
-    unsafe fn link_queue_or_unpark(&self, mut state: usize) {
-        loop {
-            assert_ne!(state & SIGNAL_LOCKED, 0);
-
-            let signals = state & SIGNAL_MASK;
-            if signals > 0 {
-                return self.unpark(state, 0);
-            }
-
-            fence(Ordering::Acquire);
-            let _ = Waiter::get_and_link_queue(state, |_| {});
-
-            match self.state.compare_exchange_weak(
-                state,
-                state & !SIGNAL_LOCKED,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(e) => state = e,
-            }
-        }
-    }
-
-    #[cold]
     unsafe fn unpark(&self, mut state: usize, also_wake: usize) {
         let mut scanned = 0;
         let mut unparked = None;
 
         loop {
-            assert_ne!(state & SIGNAL_LOCKED, 0);
+            assert_ne!(state & QUEUE_LOCKED, 0);
 
+            // If enough threads have sent notifications, just wake up all waiters.
             let signals = state & SIGNAL_MASK;
             if signals == SIGNAL_MASK {
                 return self.unpark_all();
             }
 
+            // Fix and get the ends of the wait queue in order to wake up waiters starting from the tail.
+            // Acquire barrier ensures that writes to waiters pushed to the queue
+            // happen before we start fixing/getting it.
             fence(Ordering::Acquire);
             let (head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
+            // Get the head of the waiter nodes we plan on waking up.
             let mut front = unparked.unwrap_or_else(|| {
                 scanned += 1;
                 tail
             });
 
+            // Bounded scan to collect enough waiter nodes to match current buffered signals.
             let max_scan = signals + also_wake;
             while scanned < max_scan {
                 if let Some(prev) = front.as_ref().prev.get() {
@@ -335,18 +471,24 @@ impl Condvar {
                 }
             }
 
+            // If enough threads have been scanned, just wake up all waiters.
             unparked = Some(front);
             if scanned >= SIGNAL_MASK {
                 return self.unpark_all();
             }
 
+            // If we're only waking up a portion of the queue,
+            // try to modify that queue to remove said portion only.
             if let Some(new_tail) = front.as_ref().prev.get() {
                 head.as_ref().tail.set(Some(new_tail));
                 new_tail.as_ref().next.set(None);
 
-                let mut new_state = state & !SIGNAL_LOCKED;
+                // Use saturating sub as we may have scanned to wake up a bit more than whats signaled
+                // if unpark() is being called by `notify_one()` which wakes without adding a SIGNAL.
+                let mut new_state = state & !QUEUE_LOCKED;
                 new_state -= signals.saturating_sub(scanned) * SIGNAL;
 
+                // Release barrier ensures the head/tail access above happen before we release the QUEUE_LOCKED bit before wake up.
                 match self.state.compare_exchange_weak(
                     state,
                     new_state,
@@ -357,11 +499,14 @@ impl Condvar {
                     Err(e) => state = e,
                 }
 
+                // Reverse wha we did above
                 new_tail.as_ref().next.set(Some(front));
                 head.as_ref().tail.set(Some(tail));
                 continue;
             }
 
+            // Wake all by zeroing out all the SIGNALS, unsetting the QUEUE_LOCKED bit, and unsetting the waiter queue head pointer.
+            // Release barrier ensures the head/tail access above happen before we release the QUEUE_LOCKED bit before wake up.
             match self.state.compare_exchange_weak(
                 state,
                 EMPTY,
@@ -376,8 +521,10 @@ impl Condvar {
 
     #[cold]
     unsafe fn unpark_all(&self) {
+        // Wake all by zeroing everything.
+        // Acquire barrier ensures that writes done to pushed waiters happen before we start waking them.
         let state = self.state.swap(EMPTY, Ordering::Acquire);
-        assert_ne!(state & SIGNAL_LOCKED, 0);
+        assert_ne!(state & QUEUE_LOCKED, 0);
         assert_ne!(state & SIGNAL_MASK, 0);
 
         self.unpark_waiters(state)
@@ -385,6 +532,7 @@ impl Condvar {
 
     #[cold]
     unsafe fn unpark_waiters(&self, state: usize) {
+        // Get the head waiter node from the queue and wake the entire queue.
         let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
         let head = head.expect("Condvar waking up waiters with invalid state");
 
@@ -400,9 +548,14 @@ impl Condvar {
             let waiting_on = waiter.as_ref().waiting_on.get();
             let waiting_on = waiting_on.expect("Condvar waiter not waiting on anything");
 
+            // Storing the lock the waiter is waiting on inside the waiter
+            // allows the Condvar to support waiting on multiples mutexes at once.
             let raw_rwlock = waiting_on.cast::<RawRwLock>();
             let waiter = Pin::new_unchecked(waiter.as_ref());
 
+            // Try to requeue the waiter onto the RwLock (really, Mutex) it was waiting on.
+            // Failure to do so means the lock is unlocked and we should unpark directly in
+            // hopes that the waiter will immediately acquire it.
             if !raw_rwlock.as_ref().try_requeue(waiter) {
                 waiter.parker.unpark();
             }

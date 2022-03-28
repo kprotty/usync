@@ -5,6 +5,7 @@ use std::{
     thread::{self, ThreadId},
 };
 
+/// Implementation of the `GetThreadId` trait for `lock_api::ReentrantMutex`.
 #[derive(Default, Debug)]
 pub struct RawThreadId;
 
