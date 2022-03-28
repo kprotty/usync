@@ -1,0 +1,24 @@
+[package]
+name = "usync-benchmark"
+version = "0.0.0"
+authors = ["kprotty"]
+edition = "2021"
+
+[dependencies]
+usync = { path = ".." }
+parking_lot = "0.12"
+libc = "0.2"
+
+[[bin]]
+name = "mutex"
+path = "src/mutex.rs"
+
+[[bin]]
+name = "rwlock"
+path = "src/rwlock.rs"
+
+[features]
+nightly = ["parking_lot/nightly"]
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["synchapi"] }
