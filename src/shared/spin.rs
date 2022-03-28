@@ -16,7 +16,7 @@ impl SpinWait {
             return false;
         }
 
-        if self.counter >= 10 {
+        if self.counter >= 100 {
             return false;
         }
 
@@ -31,7 +31,7 @@ impl SpinWait {
         }
 
         self.counter += 1;
-        for _ in 0..(1 << self.counter.min(3)) {
+        for _ in 0..(1 << self.counter.min(5)) {
             spin_loop();
         }
     }

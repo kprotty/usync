@@ -459,11 +459,9 @@ impl RawRwLock {
             waiter.waiting_on.set(Some(NonNull::from(self).cast()));
             waiter.flags.set(is_writer as usize);
 
+            let mut spin = SpinWait::default();
             loop {
                 let mut state = self.state.load(Ordering::Relaxed);
-                let mut spin = SpinWait::default();
-                waiter.prev.set(None);
-
                 loop {
                     let mut backoff = SpinWait::default();
                     while let Some(was_locked) = try_lock(state) {
