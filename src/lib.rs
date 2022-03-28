@@ -5,6 +5,14 @@
     missing_debug_implementations
 )]
 
+//! This library provides implementations of `Mutex`, `RwLock`, `Condvar`,
+//! `Barrier`, and `Once` that are smaller and faster than those in the Rust
+//! standard library. It also provides a `ReentrantMutex` type.
+//!
+//! Everything is powered by lock-free thread queues in userspace
+//! which allows the synchronization primitives to be 1 word (`usize`) large.
+//! All thread blocking is done through [`std::thread::park`] for maximum portability.
+
 mod barrier;
 mod condvar;
 mod mutex;
