@@ -13,8 +13,10 @@ unsafe impl lock_api::GetThreadId for RawThreadId {
 
     fn nonzero_thread_id(&self) -> NonZeroUsize {
         let thread_id = thread::current().id();
-        let id_ptr = &thread_id as *const ThreadId;
         assert!(size_of::<ThreadId>() >= size_of::<NonZeroUsize>());
+
+        // TODO: https://github.com/rust-lang/rust/issues/67939
+        let id_ptr = &thread_id as *const ThreadId;
         unsafe { ptr::read_unaligned(id_ptr as *const NonZeroUsize) }
     }
 }

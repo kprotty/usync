@@ -14,6 +14,61 @@ const SIGNAL: usize = 1;
 const SIGNAL_MASK: usize = 0b111;
 const SIGNAL_LOCKED: usize = SIGNAL_MASK + 1;
 
+/// A Condition Variable
+///
+/// Condition variables represent the ability to block a thread such that it
+/// consumes no CPU time while waiting for an event to occur. Condition
+/// variables are typically associated with a boolean predicate (a condition)
+/// and a mutex. The predicate is always verified inside of the mutex before
+/// determining that thread must block.
+///
+/// Note that each condvar can be used with multiple mutexes at a time.
+/// This is different compared to `parking_lot`'s condvar, which doesn't allow
+/// multiple threads waiting on the same condvar with different mutexes.
+///
+/// # Differences from the standard library `Condvar`
+///
+/// - Spurious wake ups are avoided. This means a wait will try to not return early
+///   unless woken up from a call to `notify_one` or `notify_all`. This is not fool-proof
+///   as events such as timeouts or stacked `notify_one` calls could cause a spurious wake up to occur.
+/// - `Condvar::notify_all` will try to only wake up a single thread with the rest being
+///   requeued to wait for the `Mutex` to be unlocked by the thread that was
+///   woken up.
+/// - Only requires 1 word of space, whereas the standard library boxes the
+///   `Condvar` due to platform limitations.
+/// - Can be statically constructed (requires the `const_fn` nightly feature).
+/// - Does not require any drop glue when dropped.
+/// - Inline fast path for the uncontended case.
+///
+/// # Examples
+///
+/// ```
+/// use usync::{Mutex, Condvar};
+/// use std::sync::Arc;
+/// use std::thread;
+///
+/// let pair = Arc::new((Mutex::new(false), Condvar::new()));
+/// let pair2 = pair.clone();
+///
+/// // Inside of our lock, spawn a new thread, and then wait for it to start
+/// thread::spawn(move|| {
+///     let &(ref lock, ref cvar) = &*pair2;
+///     let mut started = lock.lock();
+///     *started = true;
+///     cvar.notify_one();
+/// });
+///
+/// // wait for the thread to start up
+/// let &(ref lock, ref cvar) = &*pair;
+/// let mut started = lock.lock();
+/// if !*started {
+///     cvar.wait(&mut started);
+/// }
+/// // Note that we used an if instead of a while loop above. This is only
+/// // possible because usync's Condvar will only spuriously wake up when timeouts
+/// // are involved. This means that wait() will only return after notify_one or
+/// // notify_all is called in this instance.
+/// ```
 #[derive(Default)]
 pub struct Condvar {
     state: AtomicUsize,

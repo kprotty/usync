@@ -636,12 +636,107 @@ impl RawRwLock {
     }
 }
 
+/// A reader-writer lock
+///
+/// This type of lock allows a number of readers or at most one writer at any
+/// point in time. The write portion of this lock typically allows modification
+/// of the underlying data (exclusive access) and the read portion of this lock
+/// typically allows for read-only access (shared access).
+///
+/// This lock uses a task-fair locking policy which avoids both reader and
+/// writer starvation. This means that readers trying to acquire the lock will
+/// block even if the lock is unlocked when there are writers waiting to acquire
+/// the lock. Because of this, attempts to recursively acquire a read lock
+/// within a single thread may result in a deadlock.
+///
+/// The type parameter `T` represents the data that this lock protects. It is
+/// required that `T` satisfies `Send` to be shared across threads and `Sync` to
+/// allow concurrent access through readers. The RAII guards returned from the
+/// locking methods implement `Deref` (and `DerefMut` for the `write` methods)
+/// to allow access to the contained of the lock.
+///
+/// # Fairness
+///
+/// A typical unfair lock can often end up in a situation where a single thread
+/// quickly acquires and releases the same lock in succession, which can starve
+/// other threads waiting to acquire the rwlock. While this improves throughput
+/// because it doesn't force a context switch when a thread tries to re-acquire
+/// a rwlock it has just released, this can starve other threads.
+///
+/// This rwlock is unfair by default. This means that a thread which unlocks the
+/// rwlock is allowed to re-acquire it again even when other threads are waiting
+/// for the lock.
+///
+/// This greatly improves throughput (read "performance") but could potentially
+/// starve an unlucky thread when there's constant lock contention. The rwlock
+/// tries to at least wake up threads in the order that they we're queued as an
+/// attempt to avoid starvation, but it is entirely up to the OS scheduler.
+///
+/// # Differences from the standard library `RwLock`
+///
+/// - Task-fair locking policy instead of an unspecified platform default.
+/// - No poisoning, the lock is released normally on panic.
+/// - Only requires 1 word of space, whereas the standard library boxes the
+///   `RwLock` due to platform limitations.
+/// - Can be statically constructed.
+/// - Does not require any drop glue when dropped.
+/// - Inline fast path for the uncontended case.
+/// - Efficient handling of micro-contention using adaptive spinning.
+/// - Allows raw locking & unlocking without a guard.
+///
+/// # Examples
+///
+/// ```
+/// use usync::RwLock;
+///
+/// let lock = RwLock::new(5);
+///
+/// // many reader locks can be held at once
+/// {
+///     let r1 = lock.read();
+///     let r2 = lock.read();
+///     assert_eq!(*r1, 5);
+///     assert_eq!(*r2, 5);
+/// } // read locks are dropped at this point
+///
+/// // only one write lock may be held, however
+/// {
+///     let mut w = lock.write();
+///     *w += 1;
+///     assert_eq!(*w, 6);
+/// } // write lock is dropped here
+/// ```
 pub type RwLock<T> = lock_api::RwLock<RawRwLock, T>;
+
+/// RAII structure used to release the shared read access of a lock when
+/// dropped.
 pub type RwLockReadGuard<'a, T> = lock_api::RwLockReadGuard<'a, RawRwLock, T>;
+
+/// RAII structure used to release the exclusive write access of a lock when
+/// dropped.
 pub type RwLockWriteGuard<'a, T> = lock_api::RwLockWriteGuard<'a, RawRwLock, T>;
+
+/// An RAII read lock guard returned by `RwLockReadGuard::map`, which can point to a
+/// subfield of the protected data.
+///
+/// The main difference between `MappedRwLockReadGuard` and `RwLockReadGuard` is that the
+/// former doesn't support temporarily unlocking and re-locking, since that
+/// could introduce soundness issues if the locked object is modified by another
+/// thread.
 pub type MappedRwLockReadGuard<'a, T> = lock_api::MappedRwLockReadGuard<'a, RawRwLock, T>;
+
+/// An RAII write lock guard returned by `RwLockWriteGuard::map`, which can point to a
+/// subfield of the protected data.
+///
+/// The main difference between `MappedRwLockWriteGuard` and `RwLockWriteGuard` is that the
+/// former doesn't support temporarily unlocking and re-locking, since that
+/// could introduce soundness issues if the locked object is modified by another
+/// thread.
 pub type MappedRwLockWriteGuard<'a, T> = lock_api::MappedRwLockWriteGuard<'a, RawRwLock, T>;
 
+/// Creates a new instance of an `RwLock<T>` which is unlocked.
+///
+/// This allows creating a `RwLock<T>` in a constant context on stable Rust.
 pub const fn const_rwlock<T>(value: T) -> RwLock<T> {
     RwLock::const_new(<RawRwLock as lock_api::RawRwLock>::INIT, value)
 }

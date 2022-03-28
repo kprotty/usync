@@ -42,10 +42,93 @@ unsafe impl lock_api::RawMutex for RawMutex {
     }
 }
 
+/// A mutual exclusion primitive useful for protecting shared data
+///
+/// This mutex will block threads waiting for the lock to become available. The
+/// mutex can be statically initialized or created by the `new`
+/// constructor. Each mutex has a type parameter which represents the data that
+/// it is protecting. The data can only be accessed through the RAII guards
+/// returned from `lock` and `try_lock`, which guarantees that the data is only
+/// ever accessed when the mutex is locked.
+///
+/// # Fairness
+///
+/// This lock is a wrapper for [`RwLock`](type.RwLock.html) underneath and
+/// has similar fairness guarantees. To reiterate, the mutex is unfair by default.
+/// This means that a thread which unlocks the mutex is allowed to re-acquire it again
+/// even when other threads are waiting for the lock.
+///
+/// This greatly improves throughput (read "performance") but could potentially
+/// starve an unlucky thread when there's constant lock contention. The mutex
+/// tries to at least wake up threads in the order that they we're queued as an
+/// attempt to avoid starvation, but it is entirely up to the OS scheduler.
+///
+/// # Differences from the standard library `Mutex`
+///
+/// - No poisoning, the lock is released normally on panic.
+/// - Only requires 1 word (usize) of space, whereas the standard library boxes the
+///   `Mutex` due to platform limitations.
+/// - Can be statically constructed.
+/// - Does not require any drop glue when dropped.
+/// - Inline fast path for the uncontended case.
+/// - Efficient handling of micro-contention using adaptive spinning.
+/// - Allows raw locking & unlocking without a guard.
+///
+/// # Examples
+///
+/// ```
+/// use usync::Mutex;
+/// use std::sync::{Arc, mpsc::channel};
+/// use std::thread;
+///
+/// const N: usize = 10;
+///
+/// // Spawn a few threads to increment a shared variable (non-atomically), and
+/// // let the main thread know once all increments are done.
+/// //
+/// // Here we're using an Arc to share memory among threads, and the data inside
+/// // the Arc is protected with a mutex.
+/// let data = Arc::new(Mutex::new(0));
+///
+/// let (tx, rx) = channel();
+/// for _ in 0..10 {
+///     let (data, tx) = (Arc::clone(&data), tx.clone());
+///     thread::spawn(move || {
+///         // The shared state can only be accessed once the lock is held.
+///         // Our non-atomic increment is safe because we're the only thread
+///         // which can access the shared state when the lock is held.
+///         let mut data = data.lock();
+///         *data += 1;
+///         if *data == N {
+///             tx.send(()).unwrap();
+///         }
+///         // the lock is unlocked here when `data` goes out of scope.
+///     });
+/// }
+///
+/// rx.recv().unwrap();
+/// ```
 pub type Mutex<T> = lock_api::Mutex<RawMutex, T>;
+
+/// An RAII implementation of a "scoped lock" of a mutex. When this structure is
+/// dropped (falls out of scope), the lock will be unlocked.
+///
+/// The data protected by the mutex can be accessed through this guard via its
+/// `Deref` and `DerefMut` implementations.
 pub type MutexGuard<'a, T> = lock_api::MutexGuard<'a, RawMutex, T>;
+
+/// An RAII mutex guard returned by `MutexGuard::map`, which can point to a
+/// subfield of the protected data.
+///
+/// The main difference between `MappedMutexGuard` and `MutexGuard` is that the
+/// former doesn't support temporarily unlocking and re-locking, since that
+/// could introduce soundness issues if the locked object is modified by another
+/// thread.
 pub type MappedMutexGuard<'a, T> = lock_api::MappedMutexGuard<'a, RawMutex, T>;
 
+/// Creates a new mutex in an unlocked state ready for use.
+///
+/// This allows creating a mutex in a constant context on stable Rust.
 pub const fn const_mutex<T>(value: T) -> Mutex<T> {
     Mutex::const_new(<RawMutex as lock_api::RawMutex>::INIT, value)
 }

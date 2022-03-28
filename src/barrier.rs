@@ -44,6 +44,9 @@ pub struct Barrier {
     _p: PhantomData<*const Waiter>,
 }
 
+unsafe impl Send for Barrier {}
+unsafe impl Sync for Barrier {}
+
 impl fmt::Debug for Barrier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Barrier").finish_non_exhaustive()
