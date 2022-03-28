@@ -1,8 +1,8 @@
 use crate::shared::{SpinWait, Waiter};
 use std::{
     fmt,
-    ptr::NonNull,
     marker::PhantomData,
+    ptr::NonNull,
     sync::atomic::{fence, AtomicUsize, Ordering},
 };
 
