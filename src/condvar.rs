@@ -2,8 +2,8 @@ use super::{shared::Waiter, MutexGuard, RawRwLock};
 use lock_api::RawMutex as _RawMutex;
 use std::{
     fmt,
-    pin::Pin,
     marker::PhantomData,
+    pin::Pin,
     ptr::NonNull,
     sync::atomic::{fence, AtomicUsize, Ordering},
     time::{Duration, Instant},

@@ -2,8 +2,8 @@ use super::shared::{SpinWait, Waiter};
 use lock_api::RawRwLock as _RawRwLock;
 use std::{
     fmt,
-    pin::Pin,
     marker::PhantomData,
+    pin::Pin,
     ptr::NonNull,
     sync::atomic::{fence, AtomicUsize, Ordering},
 };
