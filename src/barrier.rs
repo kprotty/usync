@@ -148,19 +148,20 @@ impl Barrier {
                 }
 
                 let waiter_ptr = &*waiter as *const Waiter as usize;
-                let mut new_state = (state & !Waiter::MASK) | waiter_ptr | QUEUED;
+                let mut new_state = waiter_ptr | QUEUED;
 
                 if state & QUEUED == 0 {
-                    waiter
-                        .counter
-                        .store(state >> COUNT_SHIFT, Ordering::Relaxed);
+                    let counter = (state >> COUNT_SHIFT)
+                        .checked_sub(1)
+                        .expect("Barrier counter with zero value when waiting");
+
+                    waiter.counter.store(counter, Ordering::Relaxed);
                     waiter.next.set(None);
                     waiter.tail.set(Some(NonNull::from(&*waiter)));
                 } else {
+                    let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
                     new_state |= QUEUE_LOCKED;
-                    waiter
-                        .next
-                        .set(NonNull::new((state & Waiter::MASK) as *mut Waiter));
+                    waiter.next.set(head);
                     waiter.tail.set(None);
                 }
 
@@ -174,7 +175,7 @@ impl Barrier {
                     continue;
                 }
 
-                if state & (QUEUED | QUEUE_LOCKED) == QUEUED {
+                if (state & QUEUED != 0) && (state & QUEUE_LOCKED == 0) {
                     if unsafe { self.link_queue_or_complete(new_state) } {
                         return true;
                     }
@@ -193,8 +194,8 @@ impl Barrier {
             assert_ne!(state & QUEUED, 0);
             assert_ne!(state & QUEUE_LOCKED, 0);
 
-            fence(Ordering::Acquire);
             let mut discovered = 0;
+            fence(Ordering::Acquire);
             let (_, tail) = Waiter::get_and_link_queue(state, |_| discovered += 1);
 
             let mut counter = tail.as_ref().counter.load(Ordering::Relaxed);
@@ -207,7 +208,7 @@ impl Barrier {
 
             match self.state.compare_exchange_weak(
                 state,
-                state & QUEUE_LOCKED,
+                state & !QUEUE_LOCKED,
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
