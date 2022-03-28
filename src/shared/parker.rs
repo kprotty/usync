@@ -101,7 +101,7 @@ impl Parker {
                 assert_ne!(
                     event,
                     Self::notified(),
-                    "multiple threads unparked same Parker"
+                    "multiple threads tried to unpark the same Parker"
                 );
                 Pin::new_unchecked(event.as_ref()).set();
             }

@@ -253,90 +253,15 @@ impl RawRwLock {
     }
 }
 
-//  --- x86 Hardware-Lock-Elision Specializations
-
-#[cfg(all(
-    feature = "hardware-lock-elision",
-    any(target_arch = "x86", target_arch = "x86_64")
-))]
-impl RawRwLock {
-    #[inline(always)]
-    fn try_lock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
-        Some(unsafe {
-            let mut prev_state: usize;
-            #[cfg(target_pointer_width = "64")]
-            std::arch::asm!(
-                "xacquire lock cmpxchg qword ptr [{0:r}], {1}",
-                in(reg) &self.state,
-                in(reg) SINGLE_READER,
-                inout("rax") UNLOCKED => prev_state,
-                options(nostack),
-            );
-            #[cfg(target_pointer_width = "32")]
-            std::arch::asm!(
-                "xacquire lock cmpxchg dword ptr [{0:e}], {1}",
-                in(reg) &self.state,
-                in(reg) SINGLE_READER,
-                inout("eax") UNLOCKED => prev_state,
-                options(nostack),
-            );
-            match prev_state {
-                UNLOCKED => Ok(prev_state),
-                _ => Err(prev_state),
-            }
-        })
-    }
-
-    #[inline(always)]
-    fn try_unlock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
-        Some(unsafe {
-            let mut prev_state: usize;
-            #[cfg(target_pointer_width = "64")]
-            std::arch::asm!(
-                "xrelease lock cmpxchg qword ptr [{0:r}], {1}",
-                in(reg) &self.state,
-                in(reg) UNLOCKED,
-                inout("rax") SINGLE_READER => prev_state,
-            );
-            #[cfg(target_pointer_width = "32")]
-            std::arch::asm!(
-                "xrelease lock cmpxchg dword ptr [{0:e}], {1}",
-                in(reg) &self.state,
-                in(reg) UNLOCKED,
-                inout("eax") SINGLE_READER => prev_state,
-            );
-            match prev_state {
-                SINGLE_READER => Ok(prev_state),
-                _ => Err(prev_state),
-            }
-        })
-    }
-}
-
-#[cfg(not(feature = "hardware-lock-elision"))]
-impl RawRwLock {
-    #[inline(always)]
-    fn try_lock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
-        None
-    }
-
-    #[inline(always)]
-    fn try_unlock_shared_uncontended(&self) -> Option<Result<usize, usize>> {
-        None
-    }
-}
-
 //  --- Generic Code
 
 impl RawRwLock {
     #[inline(always)]
     fn try_lock_shared_assuming(&self, state: usize) -> Option<Result<usize, usize>> {
-        if state == UNLOCKED {
-            if let Some(result) = self.try_lock_shared_uncontended() {
-                return Some(result);
+        if state != UNLOCKED {
+            if state & (LOCKED | READING | QUEUED) != (LOCKED | READING) {
+                return None;
             }
-        } else if state & (LOCKED | READING | QUEUED) != (LOCKED | READING) {
-            return None;
         }
 
         if let Some(with_reader) = state.checked_add(1 << READER_SHIFT) {
@@ -378,9 +303,9 @@ impl RawRwLock {
             return false;
         }
 
-        // If we support the fast uncontended path, try unlocking with it
-        let result = self.try_unlock_shared_uncontended();
-        matches!(result, Some(Ok(_)))
+        self.state
+            .compare_exchange(SINGLE_READER, UNLOCKED, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
     }
 
     #[cold]
@@ -390,14 +315,6 @@ impl RawRwLock {
             assert_ne!(state & LOCKED, 0);
             assert_ne!(state & READING, 0);
             assert_ne!(state >> READER_SHIFT, 0);
-
-            if state == SINGLE_READER {
-                match self.try_unlock_shared_uncontended() {
-                    None => {}
-                    Some(Ok(_)) => return,
-                    Some(Err(e)) => state = e,
-                }
-            }
 
             let mut new_state = state - (1 << READER_SHIFT);
             if state == SINGLE_READER {
@@ -489,8 +406,6 @@ impl RawRwLock {
 
     #[cold]
     pub(super) unsafe fn try_requeue(&self, waiter: Pin<&Waiter>) -> bool {
-        waiter.prev.set(None);
-
         let is_writer = waiter.flags.get() != 0;
         assert!(is_writer);
 
@@ -509,19 +424,21 @@ impl RawRwLock {
     }
 
     unsafe fn try_queue(&self, state: &mut usize, waiter: Pin<&Waiter>) -> bool {
+        waiter.prev.set(None);
+        
         let waiter_ptr = &*waiter as *const Waiter as usize;
         let mut new_state = (*state & !Waiter::MASK) | waiter_ptr | QUEUED;
 
         if *state & QUEUED == 0 {
             let readers = *state >> READER_SHIFT;
             waiter.counter.store(readers, Ordering::Relaxed);
-            waiter.tail.set(Some(NonNull::from(&*waiter)));
             waiter.next.set(None);
+            waiter.tail.set(Some(NonNull::from(&*waiter)));
         } else {
             let head = NonNull::new((*state & Waiter::MASK) as *mut Waiter);
             new_state |= QUEUE_LOCKED;
-            waiter.tail.set(None);
             waiter.next.set(head);
+            waiter.tail.set(None);
         }
 
         if let Err(e) = self.state.compare_exchange_weak(
