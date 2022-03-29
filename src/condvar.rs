@@ -5,7 +5,7 @@ use std::{
     marker::PhantomData,
     pin::Pin,
     ptr::NonNull,
-    sync::atomic::{fence, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
@@ -276,7 +276,7 @@ impl Condvar {
 
             // Fix the prev links in the waiter queue now that we hold the QUEUE_LOCKED bit.
             // Acquire barrier to ensure writes to waiters pushed to the queue happen before we start fixing it.
-            fence(Ordering::Acquire);
+            crate::shared::fence_acquire(&self.state);
             let _ = Waiter::get_and_link_queue(state, |_| {});
 
             // Finally, try to the release the QUEUE_LOCKED bit.
@@ -451,7 +451,7 @@ impl Condvar {
             // Fix and get the ends of the wait queue in order to wake up waiters starting from the tail.
             // Acquire barrier ensures that writes to waiters pushed to the queue
             // happen before we start fixing/getting it.
-            fence(Ordering::Acquire);
+            crate::shared::fence_acquire(&self.state);
             let (head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
             // Get the head of the waiter nodes we plan on waking up.

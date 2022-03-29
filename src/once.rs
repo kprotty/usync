@@ -3,7 +3,7 @@ use std::{
     fmt,
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{fence, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 const UNINIT: usize = 0;
@@ -189,14 +189,14 @@ impl Once {
                 // Once the state is completed, we can return.
                 // Acquire barrier to ensure the Once function call and completion happen before we return.
                 if state == COMPLETED {
-                    fence(Ordering::Acquire);
+                    crate::shared::fence_acquire(&self.state);
                     return;
                 }
 
                 // Check for poision and panic if the caller can't ignore it.
                 // Acquire barrier to ensure the Once function call panic happened before we return.
                 if state == POISONED && !ignore_poison {
-                    fence(Ordering::Acquire);
+                    crate::shared::fence_acquire(&self.state);
                     panic!("Once instance was previously poisoned");
                 }
 
