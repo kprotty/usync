@@ -13,7 +13,9 @@ categories = ["concurrency", "data-structures"]
 keywords = ["mutex", "condvar", "rwlock", "once", "thread"]
 
 [features]
+default = []
 send_guard = []
+nightly = ["lock_api/nightly"]
 
 [dependencies]
 lock_api = "0.4"
