@@ -100,6 +100,7 @@ jobs:
 
       - run: ${{ env.CARGO }} test --verbose ${{ env.TARGET }}
       - run: ${{ env.CARGO }} test --all-features --verbose ${{ env.TARGET }}
+        if: matrix.target == 'nightly'
 
   # Check no warnings.
   lint:
@@ -118,6 +119,7 @@ jobs:
           rust-version: ${{ matrix.rust }}
       - run: cargo check --all-targets --verbose
       - run: cargo check --all-targets --verbose --all-features
+        if: matrix.target == 'nightly'
 
   # Ensure patch is formatted.
   fmt:
