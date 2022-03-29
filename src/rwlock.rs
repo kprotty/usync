@@ -1,4 +1,5 @@
 use super::shared::{SpinWait, Waiter};
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use lock_api::RawRwLock as _RawRwLock;
 use std::{
     fmt,
@@ -252,8 +253,8 @@ impl RawRwLock {
     }
 
     #[cold]
-    unsafe fn unlock_and_unpark(&self, mut state: usize) {
-        let state = self.state.load(Ordering::Relaxed);
+    unsafe fn unlock_and_unpark(&self) {
+        let mut state = self.state.load(Ordering::Relaxed);
         loop {
             assert_ne!(state & LOCKED, 0);
             assert_ne!(state & QUEUED, 0);
