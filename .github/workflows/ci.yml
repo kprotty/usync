@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Test on stable and MSRV
+  test:
+    name: Test Rust - ${{ matrix.build }}
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO: cargo
+      TARGET: ""
+      RUSTFLAGS: -Dwarnings
+    strategy:
+      fail-fast: false
+      matrix:
+        build:
+          - macos
+          - linux
+          - linux32
+          - win64-msvc
+          - win64-gnu
+          - win32-msvc
+          - win32-gnu
+          - msrv
+          - beta
+          - nightly
+          - arm32
+          - arm64
+        include:
+          - build: linux
+            os: ubuntu-latest
+            rust: stable
+          - build: macos
+            os: macos-latest
+            rust: stable
+          - build: win64-msvc
+            os: windows-2019
+            rust: stable
+          - build: win64-gnu
+            os: windows-2019
+            rust: stable-x86_64-gnu
+          - build: win32-msvc
+            os: windows-2019
+            rust: stable-i686-msvc
+          - build: win32-gnu
+            os: windows-2019
+            rust: stable-i686-gnu
+          - build: beta
+            os: ubuntu-latest
+            rust: beta
+          - build: nightly
+            os: ubuntu-latest
+            rust: nightly
+          - build: linux32
+            os: ubuntu-latest
+            rust: stable
+            target: i686-unknown-linux-gnu
+          # These should prob. be more generic arm targets and not
+          # android, but *shrug*
+          - build: arm32
+            os: ubuntu-latest
+            rust: stable
+            target: armv7-linux-androideabi
+          - build: arm64
+            os: ubuntu-latest
+            rust: stable
+            target: aarch64-linux-android
+
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 1
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          profile: minimal
+          override: true
+
+      - name: Setup cross if needed
+        if: matrix.target != ''
+        run: |
+          cargo install cross
+          echo "CARGO=cross" >> $GITHUB_ENV
+          echo "TARGET=--target ${{ matrix.target }}" >> $GITHUB_ENV
+      - name: Show command used for Cargo
+        run: |
+          echo "cargo command is: ${{ env.CARGO }}"
+          echo "target flag is: ${{ env.TARGET }}"
+
+      - run: ${{ env.CARGO }} test --verbose ${{ env.TARGET }}
+      - run: ${{ env.CARGO }} test --all-features --verbose ${{ env.TARGET }}
+
+  # Check no warnings.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -Dwarnings
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, nightly]
+    steps:
+      - uses: actions/checkout@v2
+      - uses: hecrj/setup-rust-action@v1
+        with:
+          rust-version: ${{ matrix.rust }}
+      - run: cargo check --all-targets --verbose
+      - run: cargo check --all-targets --verbose --all-features
+
+  # Ensure patch is formatted.
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 1
+      - uses: hecrj/setup-rust-action@v1
+        with:
+          rust-version: stable
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+# Sanitizers don't pass yet... 😢
+
+#  sanitizers:
+#    name: Test sanitizer ${{ matrix.sanitizer }}
+#    runs-on: ubuntu-latest
+#    env:
+#      RUST_BACKTRACE: 0
+#      # only used by asan, but we set it for all of them cuz its easy
+#      ASAN_OPTIONS: detect_stack_use_after_return=1
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        sanitizer: [address, memory, thread]
+#        include:
+#          - sanitizer: memory
+#            extra_rustflags: "-Zsanitizer-memory-track-origins"
+#
+#    steps:
+#      - uses: actions/checkout@v2
+#        with:
+#          fetch-depth: 1
+#      - uses: actions-rs/toolchain@v1
+#        with:
+#          profile: minimal
+#          toolchain: nightly
+#          override: true
+#          components: rust-src
+#      - name: Test with sanitizer
+#        env:
+#          RUSTFLAGS: -Zsanitizer=${{ matrix.sanitizer }} ${{ matrix.extra_rustflags }}
+#          RUSTDOCFLAGS: -Zsanitizer=${{ matrix.sanitizer }} ${{ matrix.extra_rustflags }}
+#        run: |
+#          echo "note: RUSTFLAGS='$RUSTFLAGS'"
+#          cargo -Zbuild-std test --target=x86_64-unknown-linux-gnu
