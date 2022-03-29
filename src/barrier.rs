@@ -3,7 +3,7 @@ use std::{
     fmt,
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{fence, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 const QUEUED: usize = 1;
@@ -152,7 +152,7 @@ impl Barrier {
                 // If the queue became completed, return that we are not the leader.
                 // Acqire barrier to ensure the queue completion happens before we return.
                 if state == COMPLETED {
-                    fence(Ordering::Acquire);
+                    crate::shared::fence_acquire(&self.state);
                     return false;
                 }
 
@@ -242,7 +242,7 @@ impl Barrier {
             // Fix the prev links in the waiter queue now that we hold the QUEUE_LOCKED bit.
             // Also track how many waiters we discovered while trying to fix the waiter links.
             // Acquire barrier to ensure writes to waiters pushed to the queue happen before we start fixing it.
-            fence(Ordering::Acquire);
+            crate::shared::fence_acquire(&self.state);
             let mut discovered = 0;
             let (_, tail) = Waiter::get_and_link_queue(state, |_| discovered += 1);
 

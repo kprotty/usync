@@ -1,12 +1,10 @@
 use super::shared::{SpinWait, Waiter};
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use lock_api::RawRwLock as _RawRwLock;
 use std::{
     fmt,
     marker::PhantomData,
     pin::Pin,
     ptr::NonNull,
-    sync::atomic::{fence, AtomicUsize, Ordering},
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 const UNLOCKED: usize = 0;
@@ -129,6 +127,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 impl RawRwLock {
     #[inline(always)]
     fn try_lock_exclusive_assuming(&self, _state: usize) -> bool {
+        use lock_api::RawRwLock as _;
         self.try_lock_exclusive()
     }
 
@@ -155,7 +154,11 @@ impl RawRwLock {
                 out(reg_byte) old_locked_bit,
                 options(nostack),
             );
-            old_locked_bit == 0
+            let acquired = old_locked_bit == 0;
+            if acquired {
+                crate::shared::fence_acquire(&self.state);
+            }
+            acquired
         }
     }
 
@@ -390,7 +393,7 @@ impl RawRwLock {
         // As long as the Waiter writes are atomic, this can be soundly racing with
         // other callers to get_and_link_queue() like link_queue_or_unpark() or other readers.
         // Acquire barrier to ensure Waiter queue writes to head happen before we start scanning.
-        fence(Ordering::Acquire);
+        crate::shared::fence_acquire(&self.state);
         let (_head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
         // Decrement the reader count which was moved to the tail.
@@ -402,7 +405,7 @@ impl RawRwLock {
         // Acquire barrier synchronizes with the Release to counter above to ensure
         // that the unsetting of the LOCKED bit happens after all the readers reads/loads occur.
         if readers == 1 {
-            fence(Ordering::Acquire);
+            crate::shared::fence_acquire(&self.state);
             self.unlock_shared_and_unpark();
         }
     }
@@ -555,7 +558,7 @@ impl RawRwLock {
 
             // Fix the prev links in the waiter queue now that we hold the QUEUE_LOCKED bit.
             // Acquire barrier to ensure writes to waiters pushed to the queue happen before we start fixing it.
-            fence(Ordering::Acquire);
+            crate::shared::fence_acquire(&self.state);
             let _ = Waiter::get_and_link_queue(state, |_| {});
 
             // Finally, try to the release the QUEUE_LOCKED bit.
@@ -598,7 +601,7 @@ impl RawRwLock {
             // Fix and get the ends of the wait queue in order to wake the tail up.
             // Acquire barrier ensures that writes to waiters pushed to the queue
             // happen before we start fixing/getting it.
-            fence(Ordering::Acquire);
+            crate::shared::fence_acquire(&self.state);
             let (head, tail) = Waiter::get_and_link_queue(state, |_| {});
 
             // If the tail (the waiter to wake up) is a writer,
