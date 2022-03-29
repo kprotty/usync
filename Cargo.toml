@@ -7,13 +7,10 @@ authors = ["kprotty"]
 readme = "README.md"
 homepage = "https://github.com/kprotty"
 documentation = "https://docs.rs/usync"
+repository = "https://github.com/kprotty/usync"
 description = "fast, drop-in, synchronization primitives"
 categories = ["concurrency", "data-structures"]
-keywords = [
-    "atomic", "lock", 
-    "mutex", "rwlock", "condvar", "once",
-    "parallel", "parallelism", "thread", "concurrent", "performance",
-]
+keywords = ["mutex", "condvar", "rwlock", "once", "thread"]
 
 [features]
 send_guard = []
