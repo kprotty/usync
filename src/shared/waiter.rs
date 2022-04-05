@@ -1,4 +1,4 @@
-use super::parker::Parker;
+use super::{parker::Parker, StrictProvenance};
 use std::{
     cell::Cell,
     marker::PhantomPinned,
@@ -48,10 +48,10 @@ impl Waiter {
     }
 
     pub(crate) unsafe fn get_and_link_queue(
-        value: usize,
+        value: *mut Waiter,
         mut on_waiter_discovered: impl FnMut(NonNull<Self>),
     ) -> (NonNull<Self>, NonNull<Self>) {
-        let head = NonNull::new((value & Self::MASK) as *mut Waiter);
+        let head = NonNull::new(value.map_addr(|addr| addr & Self::MASK));
         let head = head.expect("invalid Waiter queue head pointer");
 
         // Check if the tail is cached at the head from a previous get_and_link_queue() call.

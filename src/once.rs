@@ -1,9 +1,9 @@
-use crate::shared::{SpinWait, Waiter};
+use crate::shared::{fence_acquire, invalid_mut, SpinWait, StrictProvenance, Waiter};
 use std::{
     fmt,
-    marker::PhantomData,
+    mem::drop,
     ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
 const UNINIT: usize = 0;
@@ -52,8 +52,7 @@ pub struct Once {
     /// -----------+-----------+--------------------------------------------------------------------
     ///  COMPLETED |     0     | The once was once calling and the function completed, resolving the state.
     /// -----------+-----------+--------------------------------------------------------------------
-    state: AtomicUsize,
-    _p: PhantomData<*const Waiter>,
+    state: AtomicPtr<Waiter>,
 }
 
 unsafe impl Send for Once {}
@@ -71,15 +70,14 @@ impl Once {
     /// Creates a new `Once` value.
     pub const fn new() -> Self {
         Self {
-            state: AtomicUsize::new(UNINIT),
-            _p: PhantomData,
+            state: AtomicPtr::new(invalid_mut(UNINIT)),
         }
     }
 
     /// Returns the current state of this `Once`.
     pub fn state(&self) -> OnceState {
         let state = self.state.load(Ordering::Relaxed);
-        match state & !Waiter::MASK {
+        match state.addr() & !Waiter::MASK {
             UNINIT => OnceState::New,
             CALLING => OnceState::InProgress,
             POISONED => OnceState::Poisoned,
@@ -145,7 +143,7 @@ impl Once {
         // Fast path to check if the state was completed.
         // Acquire barrier to ensure that Once function call and completion happens before we return.
         let state = self.state.load(Ordering::Acquire);
-        if state == COMPLETED {
+        if state.addr() == COMPLETED {
             return;
         }
 
@@ -169,7 +167,7 @@ impl Once {
         // Fast path to check if the state was completed.
         // Acquire barrier to ensure that Once function call and completion happens before we return.
         let state = self.state.load(Ordering::Acquire);
-        if state == COMPLETED {
+        if state.addr() == COMPLETED {
             return;
         }
 
@@ -188,24 +186,24 @@ impl Once {
             loop {
                 // Once the state is completed, we can return.
                 // Acquire barrier to ensure the Once function call and completion happen before we return.
-                if state == COMPLETED {
-                    crate::shared::fence_acquire(&self.state);
+                if state.addr() == COMPLETED {
+                    fence_acquire(&self.state);
                     return;
                 }
 
                 // Check for poision and panic if the caller can't ignore it.
                 // Acquire barrier to ensure the Once function call panic happened before we return.
-                if state == POISONED && !ignore_poison {
-                    crate::shared::fence_acquire(&self.state);
+                if state.addr() == POISONED && !ignore_poison {
+                    fence_acquire(&self.state);
                     panic!("Once instance was previously poisoned");
                 }
 
                 // There is a thread in the middle of calling their function on the Once.
                 // Queue our waiter in order to wait for them to finish calling.
-                if state & 0b11 == CALLING {
+                if state.addr() & !Waiter::MASK == CALLING {
                     // Try to spin a little bit in hopes that they finish the function call soon.
                     // Don't spin if there's already threads waiting as we should start waiting too.
-                    let head = NonNull::new((state & Waiter::MASK) as *mut Waiter);
+                    let head = NonNull::new(state.map_addr(|addr| addr & Waiter::MASK));
                     if head.is_none() && spin.try_yield_now() {
                         state = self.state.load(Ordering::Relaxed);
                         continue;
@@ -213,8 +211,8 @@ impl Once {
 
                     // Push our waiter to the queue in a stack-like manner.
                     waiter.next.set(head);
-                    let waiter_ptr = &*waiter as *const Waiter as usize;
-                    let new_state = waiter_ptr | CALLING;
+                    let waiter_ptr = NonNull::from(&*waiter).as_ptr();
+                    let new_state = waiter_ptr.map_addr(|addr| addr | CALLING);
 
                     // Release barrier to ensure our waiter's writes happen before the calling thread
                     // iterates the queue in order to wake us up.
@@ -236,7 +234,7 @@ impl Once {
 
                 match self.state.compare_exchange_weak(
                     state,
-                    CALLING,
+                    state.with_addr(CALLING),
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
@@ -248,7 +246,7 @@ impl Once {
     }
 
     #[cold]
-    fn do_call<F>(&self, old_state: usize, f: F)
+    fn do_call<F>(&self, old_state: *mut Waiter, f: F)
     where
         F: FnOnce(OnceState),
     {
@@ -256,7 +254,7 @@ impl Once {
         /// regardless of it a panic occurs when calling f() or not.
         struct StateGuard<'a> {
             once: &'a Once,
-            reset_to: usize,
+            reset_to: *mut Waiter,
         }
 
         impl<'a> Drop for StateGuard<'a> {
@@ -265,9 +263,9 @@ impl Once {
                 // AcqRel as Acquire to ensure writes to pushed waiters happen before we iterate and wake them below.
                 // AcqRel as Release to ensure our function call happens before the waiters return from call_once_*.
                 let state = self.once.state.swap(self.reset_to, Ordering::AcqRel);
-                assert_eq!(state & 0b11, CALLING);
+                assert_eq!(state.addr() & 0b11, CALLING);
 
-                let mut waiters = NonNull::new((state & Waiter::MASK) as *mut Waiter);
+                let mut waiters = NonNull::new(state.map_addr(|addr| addr & Waiter::MASK));
                 while let Some(waiter) = waiters {
                     unsafe {
                         waiters = waiter.as_ref().next.get();
@@ -281,10 +279,10 @@ impl Once {
         // If the function call below panics, it will poison the Once.
         let mut state_guard = StateGuard {
             once: self,
-            reset_to: POISONED,
+            reset_to: old_state.with_addr(POISONED),
         };
 
-        f(match old_state {
+        f(match old_state.addr() {
             UNINIT => OnceState::New,
             POISONED => OnceState::Poisoned,
             _ => unreachable!("invalid once state on invokation"),
@@ -292,8 +290,8 @@ impl Once {
 
         // The function call completed safely,
         // so resolve the Once with COMPLETED instead of POISONED.
-        state_guard.reset_to = COMPLETED;
-        std::mem::drop(state_guard);
+        state_guard.reset_to = old_state.with_addr(COMPLETED);
+        drop(state_guard);
     }
 }
 
