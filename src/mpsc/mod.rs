@@ -593,7 +593,13 @@ impl<T> Sender<T> {
     /// assert_eq!(tx.send(1).unwrap_err().0, 1);
     /// ```
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        unimplemented!("TODO")
+        let result = match &*self.chan {
+            Channel::Rendezvous(chan) => chan.send(t),
+            Channel::Unbounded(chan) => chan.send(t),
+            _ => unreachable!("invalid channel type"),
+        };
+
+        result.map_err(|t| SendError(t))
     }
 }
 
@@ -674,7 +680,12 @@ impl<T> SyncSender<T> {
     /// assert_eq!(1, msg);
     /// ```
     pub fn send(&self, t: T) -> Result<(), SendError<T>> {
-        unimplemented!("TODO")
+        let result = match &*self.sender.chan {
+            Channel::Bounded(chan) => chan.send(t),
+            _ => unreachable!("invalid channel type"),
+        };
+
+        result.map_err(|t| SendError(t))
     }
 
     /// Attempts to send a value on this channel without blocking.
@@ -727,7 +738,15 @@ impl<T> SyncSender<T> {
     /// }
     /// ```
     pub fn try_send(&self, t: T) -> Result<(), TrySendError<T>> {
-        unimplemented!("TODO")
+        let result = match &*self.sender.chan {
+            Channel::Bounded(chan) => chan.try_send(t),
+            _ => unreachable!("invalid channel type"),
+        };
+
+        result.map_err(|res| match res {
+            Ok(t) => TrySendError::Full(t),
+            Err(t) => TrySendError::Disconnected(t),
+        })
     }
 }
 
@@ -779,7 +798,20 @@ impl<T> Receiver<T> {
     /// assert!(receiver.try_recv().is_err());
     /// ```
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        unimplemented!("TODO")
+        // SAFETY: we're the only thread that calls try_recv().
+        let result = unsafe {
+            match &*self.chan {
+                Channel::Rendezvous(chan) => chan.try_recv(),
+                Channel::Bounded(chan) => chan.try_recv(),
+                Channel::Unbounded(chan) => chan.try_recv(),
+            }
+        };
+
+        match result {
+            Err(()) => Err(TryRecvError::Disconnected),
+            Ok(None) => Err(TryRecvError::Empty),
+            Ok(Some(t)) => Ok(t),
+        }
     }
 
     /// Attempts to wait for a value on this receiver, returning an error if the
@@ -837,7 +869,20 @@ impl<T> Receiver<T> {
     /// assert_eq!(Err(RecvError), recv.recv());
     /// ```
     pub fn recv(&self) -> Result<T, RecvError> {
-        unimplemented!("TODO")
+        // SAFETY: we're the only thread that calls recv().
+        let result = unsafe {
+            match &*self.chan {
+                Channel::Rendezvous(chan) => chan.recv(None),
+                Channel::Bounded(chan) => chan.recv(None),
+                Channel::Unbounded(chan) => chan.recv(None),
+            }
+        };
+
+        match result {
+            Err(()) => Err(RecvError),
+            Ok(None) => unreachable!("timed out without a timeout"),
+            Ok(Some(t)) => Ok(t),
+        }
     }
 
     /// Attempts to wait for a value on this receiver, returning an error if the
@@ -896,7 +941,20 @@ impl<T> Receiver<T> {
     /// );
     /// ```
     pub fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        unimplemented!("TODO")
+        // SAFETY: we're the only thread that calls recv().
+        let result = unsafe {
+            match &*self.chan {
+                Channel::Rendezvous(chan) => chan.recv(Some(timeout)),
+                Channel::Bounded(chan) => chan.recv(Some(timeout)),
+                Channel::Unbounded(chan) => chan.recv(Some(timeout)),
+            }
+        };
+
+        match result {
+            Err(()) => Err(RecvTimeoutError::Disconnected),
+            Ok(None) => Err(RecvTimeoutError::Timeout),
+            Ok(Some(t)) => Ok(t),
+        }
     }
 
     /// Attempts to wait for a value on this receiver, returning an error if the
@@ -954,7 +1012,15 @@ impl<T> Receiver<T> {
     /// );
     /// ```
     pub fn recv_deadline(&self, deadline: Instant) -> Result<T, RecvTimeoutError> {
-        unimplemented!("TODO")
+        if let Some(until_deadline) = deadline.checked_duration_since(Instant::now()) {
+            return self.recv_timeout(until_deadline);
+        }
+
+        match self.try_recv() {
+            Ok(t) => Ok(t),
+            Err(TryRecvError::Empty) => Err(RecvTimeoutError::Timeout),
+            Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+        }
     }
 
     /// Returns an iterator that will block waiting for messages, but never
