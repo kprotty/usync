@@ -617,10 +617,11 @@ impl<T> Clone for Sender<T> {
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         if Arc::strong_count(&self.chan) == 2 {
+            let is_sender = true;
             match &*self.chan {
-                Channel::Rendezvous(chan) => chan.disconnect(),
-                Channel::Bounded(chan) => chan.disconnect(),
-                Channel::Unbounded(chan) => chan.disconnect(),
+                Channel::Rendezvous(chan) => chan.disconnect(is_sender),
+                Channel::Bounded(chan) => chan.disconnect(is_sender),
+                Channel::Unbounded(chan) => chan.disconnect(is_sender),
             }
         }
     }
@@ -1135,10 +1136,11 @@ impl<T> IntoIterator for Receiver<T> {
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         if Arc::strong_count(&self.chan) != 1 {
+            let is_sender = false;
             match &*self.chan {
-                Channel::Rendezvous(chan) => chan.disconnect(),
-                Channel::Bounded(chan) => chan.disconnect(),
-                Channel::Unbounded(chan) => chan.disconnect(),
+                Channel::Rendezvous(chan) => chan.disconnect(is_sender),
+                Channel::Bounded(chan) => chan.disconnect(is_sender),
+                Channel::Unbounded(chan) => chan.disconnect(is_sender),
             }
         }
     }

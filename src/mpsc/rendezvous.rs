@@ -21,7 +21,7 @@ impl<T> Queue<T> {
         unimplemented!("TODO")
     }
 
-    pub(crate) fn disconnect(&self) {
+    pub(crate) fn disconnect(&self, is_sender: bool) {
         unimplemented!("TODO")
     }
 }
