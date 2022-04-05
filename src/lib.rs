@@ -22,6 +22,8 @@ mod rwlock;
 mod shared;
 mod thread_id;
 
+pub mod mpsc;
+
 pub use ::lock_api;
 
 #[cfg(feature = "send_guard")]

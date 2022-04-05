@@ -12,14 +12,15 @@ pub(crate) struct Parker {
 }
 
 impl Parker {
+    pub(super) const fn new() -> Self {
+        Self {
+            event: AtomicPtr::new(ptr::null_mut()),
+        }
+    }
+
     /// Provides a stub pointer which is used as a sentinel to indicate "unparked"
     fn notified() -> NonNull<Event> {
-        struct SyncEvent(Event);
-        unsafe impl Send for SyncEvent {}
-        unsafe impl Sync for SyncEvent {}
-
-        static NOTIFIED: SyncEvent = SyncEvent(Event::new());
-        NonNull::from(&NOTIFIED.0)
+        NonNull::dangling()
     }
 
     fn park_complete(&self, event: *mut Event) -> bool {
@@ -46,12 +47,15 @@ impl Parker {
     #[cold]
     fn park_slow(&self, timeout: Option<Duration>) -> bool {
         Event::with(|ev| {
+            let ev_ptr = NonNull::from(&*ev).as_ptr();
+            assert!(!ptr::eq(ev_ptr, Self::notified().as_ptr()));
+
             // Register our event for waiting, bailing out if we we're notified.
             // AcqRel as Release on success which ensures the ev writes in Event::with() happen before unpark() tries to set() it.
             // Acquire on failure to ensure that the unpark() happens before we return.
             if let Err(event) = self.event.compare_exchange(
                 ptr::null_mut(),
-                NonNull::from(&*ev).as_ptr(),
+                ev_ptr,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -67,7 +71,7 @@ impl Parker {
                 // This cancels our timeout and ensures that unpark() will always be accessing valid Event memory.
                 // Release barrier on succcess to ensure ev.wait() happens before the timeout.
                 match self.event.compare_exchange(
-                    NonNull::from(&*ev).as_ptr(),
+                    ev_ptr,
                     ptr::null_mut(),
                     Ordering::Release,
                     Ordering::Relaxed,
