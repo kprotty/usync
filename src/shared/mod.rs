@@ -7,6 +7,7 @@ mod waiter;
 
 pub(crate) use self::{
     cache_aligned::CacheAligned,
+    parker::Parker,
     spin::SpinWait,
     strict_provenance::{invalid_mut, AtomicPtrRmw, StrictProvenance},
     waiter::Waiter,

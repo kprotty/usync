@@ -1,4 +1,4 @@
-use super::{parker::Parker, StrictProvenance};
+use super::{Parker, StrictProvenance};
 use std::{
     cell::Cell,
     marker::PhantomPinned,

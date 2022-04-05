@@ -12,7 +12,7 @@ pub(crate) struct Parker {
 }
 
 impl Parker {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             event: AtomicPtr::new(ptr::null_mut()),
         }
@@ -91,24 +91,35 @@ impl Parker {
     pub(crate) fn unpark(&self) {
         unsafe {
             // Try not to leave a dangling ref to the parker (see below).
-            let event_ptr = &self.event as *const AtomicPtr<Event>;
+            let event_ptr = NonNull::from(&self.event).as_ptr();
             drop(self);
 
             // FIXME (maybe): This is a case of https://github.com/rust-lang/rust/issues/55005.
-            // `swap()` has a potentially dangling ref to `event_ptr` once park() thread sees notified and returns.
+            // A successful `fetch_update()` or other event_ptr usages could have a potentially
+            // dangling ref to `event_ptr` once the park() thread sees `notified` and returns.
+            //
+            // This uses fetch_update() which uses compare_exchange_weak() internally.
+            // Reason for not using swap() is to avoid unnecessary stores when unpark() is called frequently by multiple threads.
+            // Stores are more expensive over loads as invalid the cache line and force other threads
+            // (even unpark threads, not just the park thread) to refetch/resynchronize this cache-lines memory.
+            //
             // AcqRel as Acquire barrier to ensure Event::with() writes in park() happen before we Event::set() it below.
-            // AcqRel as Release barrier to ensure that unpark() itself happens before park() returns for caller reasons.
-            let notified_ptr = Self::notified().as_ptr();
-            let event = (*event_ptr).swap(notified_ptr, Ordering::AcqRel);
+            // AcqRel as Release barrier to ensure that unpark() itself happens before park() returns for caller's reasons.
+            (*event_ptr)
+                .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |event| {
+                    let notified = Self::notified().as_ptr();
+                    if ptr::eq(event, notified) {
+                        return None;
+                    }
 
-            if let Some(event) = NonNull::new(event) {
-                assert_ne!(
-                    event,
-                    Self::notified(),
-                    "multiple threads tried to unpark the same Parker"
-                );
-                Pin::new_unchecked(event.as_ref()).set();
-            }
+                    Some(notified)
+                })
+                .map(|event| {
+                    if let Some(event) = NonNull::new(event) {
+                        Pin::new_unchecked(event.as_ref()).set();
+                    }
+                })
+                .unwrap_or(())
         }
     }
 }
