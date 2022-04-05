@@ -94,7 +94,7 @@ impl Parker {
             let event_ptr = NonNull::from(&self.event).as_ptr();
             drop(self);
 
-            // FIXME (maybe): This is a case of https://github.com/rust-lang/rust/issues/55005.
+            // FIXME (maybe): This could be a case of https://github.com/rust-lang/rust/issues/55005.
             // A successful `fetch_update()` or other event_ptr usages could have a potentially
             // dangling ref to `event_ptr` once the park() thread sees `notified` and returns.
             //
