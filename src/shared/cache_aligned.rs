@@ -1,4 +1,4 @@
-//! Prevents false sharing by padding/aligning values to a best guess of the CPU's cache line size.
+//! Prevents false sharing by aligning values to a best guess of the CPU's cache line size.
 //!
 //! False sharing is when (heavily contended) memory writes to one part of memory
 //! unintentionally invalidate another unrelated memory region.
@@ -77,9 +77,9 @@ use std::ops::Deref;
     repr(align(64))
 )]
 #[derive(Clone, Copy, Default, Hash, PartialEq, Eq)]
-pub(crate) struct CachePadded<T>(pub(crate) T);
+pub(crate) struct CacheAligned<T>(pub(crate) T);
 
-impl<T> Deref for CachePadded<T> {
+impl<T> Deref for CacheAligned<T> {
     type Target = T;
 
     fn deref(&self) -> &T {

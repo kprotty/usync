@@ -1,4 +1,4 @@
-mod cache_padded;
+mod cache_aligned;
 mod event;
 mod parker;
 mod spin;
@@ -6,7 +6,7 @@ mod strict_provenance;
 mod waiter;
 
 pub(crate) use self::{
-    cache_padded::CachePadded,
+    cache_aligned::CacheAligned,
     spin::SpinWait,
     strict_provenance::{invalid_mut, AtomicPtrRmw, StrictProvenance},
     waiter::Waiter,
