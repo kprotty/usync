@@ -205,12 +205,12 @@ impl Condvar {
             // Push our waiter to the wait queue and report if we acquired the QUEUE_LOCKED bit
             let mut state = self.state.load(Ordering::Relaxed);
             let signal_locked = loop {
-                let head = NonNull::new(state.map_addr(|addr| addr & Waiter::MASK));
+                let head = NonNull::new(state.map_address(|addr| addr & Waiter::MASK));
                 waiter.next.set(head);
 
                 let waiter_ptr = NonNull::from(&*waiter).as_ptr();
-                let mut new_state = waiter_ptr.map_addr(|addr| {
-                    let state_bits = state.addr() & !Waiter::MASK;
+                let mut new_state = waiter_ptr.map_address(|addr| {
+                    let state_bits = state.address() & !Waiter::MASK;
                     addr | state_bits
                 });
 
@@ -219,7 +219,7 @@ impl Condvar {
                 // If we're not the first waiter, try to acquire the QUEUE_LOCKED bit to link the queue.
                 if head.is_some() {
                     waiter.tail.set(None);
-                    new_state = new_state.map_addr(|addr| addr | QUEUE_LOCKED);
+                    new_state = new_state.map_address(|addr| addr | QUEUE_LOCKED);
                 } else {
                     waiter.tail.set(Some(NonNull::from(&*waiter)));
                 }
@@ -232,7 +232,7 @@ impl Condvar {
                     Ordering::Release,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => break head.is_some() && (state.addr() & QUEUE_LOCKED == 0),
+                    Ok(_) => break head.is_some() && (state.address() & QUEUE_LOCKED == 0),
                     Err(e) => state = e,
                 }
             };
@@ -268,11 +268,11 @@ impl Condvar {
     #[cold]
     unsafe fn link_queue_or_unpark(&self, mut state: *mut Waiter) {
         loop {
-            assert_ne!(state.addr() & QUEUE_LOCKED, 0);
+            assert_ne!(state.address() & QUEUE_LOCKED, 0);
 
             // If `notify_*` calls occured while we we're trying to link the queue,
             // then we are now responsible for doing the wake up from the notifications.
-            let signals = state.addr() & SIGNAL_MASK;
+            let signals = state.address() & SIGNAL_MASK;
             if signals > 0 {
                 return self.unpark(state, 0);
             }
@@ -286,7 +286,7 @@ impl Condvar {
             // Release barrier to ensure the writes we did above happen before the next QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
-                state.map_addr(|addr| addr & !QUEUE_LOCKED),
+                state.map_address(|addr| addr & !QUEUE_LOCKED),
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
@@ -322,7 +322,7 @@ impl Condvar {
     #[inline]
     pub fn notify_one(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
-        if state.addr() == EMPTY {
+        if state.address() == EMPTY {
             return false;
         }
 
@@ -332,13 +332,13 @@ impl Condvar {
     #[cold]
     fn notify_one_slow(&self, mut state: *mut Waiter) -> bool {
         loop {
-            if state.addr() == EMPTY {
+            if state.address() == EMPTY {
                 return false;
             }
 
-            if state.addr() & QUEUE_LOCKED == 0 {
+            if state.address() & QUEUE_LOCKED == 0 {
                 // Try to acquire the QUEUE_LOCKED bit to wake up the queued threads.
-                let new_state = state.map_addr(|addr| addr | QUEUE_LOCKED);
+                let new_state = state.map_address(|addr| addr | QUEUE_LOCKED);
                 if let Err(e) = self.state.compare_exchange_weak(
                     state,
                     new_state,
@@ -354,7 +354,7 @@ impl Condvar {
             }
 
             // Bail if all threads are going to be woken up eventually.
-            let signals = state.addr() & SIGNAL_MASK;
+            let signals = state.address() & SIGNAL_MASK;
             if signals == SIGNAL_MASK {
                 return false;
             }
@@ -364,7 +364,7 @@ impl Condvar {
             // the wake ups done by the QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
-                state.map_addr(|addr| addr + SIGNAL),
+                state.map_address(|addr| addr + SIGNAL),
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
@@ -386,7 +386,7 @@ impl Condvar {
     #[inline]
     pub fn notify_all(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
-        if state.addr() == EMPTY {
+        if state.address() == EMPTY {
             return false;
         }
 
@@ -396,16 +396,16 @@ impl Condvar {
     #[cold]
     fn notify_all_slow(&self, mut state: *mut Waiter) -> bool {
         loop {
-            if state.addr() == EMPTY {
+            if state.address() == EMPTY {
                 return false;
             }
 
             // If no thread is currently waking up the waiters, grab all of them to wake up.
             // Acquire barrier to ensure writes to pushed waiters happen before we start waking them up.
-            if state.addr() & QUEUE_LOCKED == 0 {
+            if state.address() & QUEUE_LOCKED == 0 {
                 if let Err(e) = self.state.compare_exchange_weak(
                     state,
-                    state.with_addr(EMPTY),
+                    state.with_address(EMPTY),
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
@@ -417,7 +417,7 @@ impl Condvar {
                 return true;
             }
 
-            let signals = state.addr() & SIGNAL_MASK;
+            let signals = state.address() & SIGNAL_MASK;
             if signals == SIGNAL_MASK {
                 return false;
             }
@@ -427,7 +427,7 @@ impl Condvar {
             // the wake ups done by the QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
-                state.map_addr(|addr| addr | SIGNAL_MASK),
+                state.map_address(|addr| addr | SIGNAL_MASK),
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
@@ -443,10 +443,10 @@ impl Condvar {
         let mut unparked = None;
 
         loop {
-            assert_ne!(state.addr() & QUEUE_LOCKED, 0);
+            assert_ne!(state.address() & QUEUE_LOCKED, 0);
 
             // If enough threads have sent notifications, just wake up all waiters.
-            let signals = state.addr() & SIGNAL_MASK;
+            let signals = state.address() & SIGNAL_MASK;
             if signals == SIGNAL_MASK {
                 return self.unpark_all();
             }
@@ -488,7 +488,7 @@ impl Condvar {
 
                 // Use saturating sub as we may have scanned to wake up a bit more than whats signaled
                 // if unpark() is being called by `notify_one()` which wakes without adding a SIGNAL.
-                let new_state = state.map_addr(|mut addr| {
+                let new_state = state.map_address(|mut addr| {
                     addr &= !QUEUE_LOCKED;
                     addr -= signals.saturating_sub(scanned) * SIGNAL;
                     addr
@@ -515,7 +515,7 @@ impl Condvar {
             // Release barrier ensures the head/tail access above happen before we release the QUEUE_LOCKED bit before wake up.
             match self.state.compare_exchange_weak(
                 state,
-                state.with_addr(EMPTY),
+                state.with_address(EMPTY),
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
@@ -530,8 +530,8 @@ impl Condvar {
         // Wake all by zeroing everything.
         // Acquire barrier ensures that writes done to pushed waiters happen before we start waking them.
         let state = self.state.swap(invalid_mut(EMPTY), Ordering::Acquire);
-        assert_ne!(state.addr() & QUEUE_LOCKED, 0);
-        assert_ne!(state.addr() & SIGNAL_MASK, 0);
+        assert_ne!(state.address() & QUEUE_LOCKED, 0);
+        assert_ne!(state.address() & SIGNAL_MASK, 0);
 
         self.unpark_waiters(state)
     }
@@ -539,7 +539,7 @@ impl Condvar {
     #[cold]
     unsafe fn unpark_waiters(&self, state: *mut Waiter) {
         // Get the head waiter node from the queue and wake the entire queue.
-        let head = NonNull::new(state.map_addr(|addr| addr & Waiter::MASK));
+        let head = NonNull::new(state.map_address(|addr| addr & Waiter::MASK));
         let head = head.expect("Condvar waking up waiters with invalid state");
 
         self.unpark_requeue(head)

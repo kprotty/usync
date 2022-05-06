@@ -11,25 +11,23 @@ pub(crate) const fn invalid_mut<T>(addr: usize) -> *mut T {
     addr as *mut T
 }
 
-pub(crate) unsafe trait StrictProvenance {
-    fn addr(self) -> usize;
+pub(crate) unsafe trait StrictProvenance: Copy {
+    fn address(self) -> usize;
 
-    fn with_addr(self, addr: usize) -> Self;
+    fn with_address(self, addr: usize) -> Self;
 
-    fn map_addr(self, f: impl FnOnce(usize) -> usize) -> Self;
+    fn map_address(self, f: impl FnOnce(usize) -> usize) -> Self {
+        self.with_address(f(self.address()))
+    }
 }
 
 unsafe impl<T> StrictProvenance for *mut T {
-    fn addr(self) -> usize {
+    fn address(self) -> usize {
         self as usize
     }
 
-    fn with_addr(self, addr: usize) -> Self {
+    fn with_address(self, addr: usize) -> Self {
         addr as Self
-    }
-
-    fn map_addr(self, f: impl FnOnce(usize) -> usize) -> Self {
-        self.with_addr(f(self.addr()))
     }
 }
 
@@ -50,7 +48,7 @@ impl<T> AtomicPtrRmw<*mut T> for AtomicPtr<T> {
             NonNull::from(self)
                 .cast::<AtomicUsize>()
                 .as_ref()
-                .fetch_add(value.addr(), ordering) as *mut T
+                .fetch_add(value.address(), ordering) as *mut T
         }
     }
 
@@ -59,7 +57,7 @@ impl<T> AtomicPtrRmw<*mut T> for AtomicPtr<T> {
             NonNull::from(self)
                 .cast::<AtomicUsize>()
                 .as_ref()
-                .fetch_sub(value.addr(), ordering) as *mut T
+                .fetch_sub(value.address(), ordering) as *mut T
         }
     }
 }
