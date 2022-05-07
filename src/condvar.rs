@@ -1092,7 +1092,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 1,
             max_queue_size: 1,
-            messages_per_producer: 100_000,
+            messages_per_producer: if cfg!(miri) { 100 } else { 100_000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Bounded(Duration::from_secs(1)),
             delay_seconds: 0
@@ -1101,7 +1101,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 1,
             max_queue_size: 1,
-            messages_per_producer: 100_000,
+            messages_per_producer: if cfg!(miri) { 100 } else { 100_000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1110,7 +1110,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 5,
             max_queue_size: 1,
-            messages_per_producer: 100_000,
+            messages_per_producer: if cfg!(miri) { 100 } else { 100_000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1119,7 +1119,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 1,
             max_queue_size: 1,
-            messages_per_producer: 100_000,
+            messages_per_producer: if cfg!(miri) { 100 } else { 100_000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1128,7 +1128,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 1,
             max_queue_size: 1,
-            messages_per_producer: 100_000,
+            messages_per_producer: if cfg!(miri) { 100 } else { 100_000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 1
@@ -1136,8 +1136,8 @@ mod webkit_queue_test {
         one_producer_one_consumer_hundred_slots(
             num_producers: 1,
             num_consumers: 1,
-            max_queue_size: 100,
-            messages_per_producer: 1_000_000,
+            max_queue_size: if cfg!(miri) { 10 } else { 100 },
+            messages_per_producer: if cfg!(miri) { 100 } else { 1000_000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1146,7 +1146,7 @@ mod webkit_queue_test {
             num_producers: 10,
             num_consumers: 1,
             max_queue_size: 1,
-            messages_per_producer: 10000,
+            messages_per_producer: if cfg!(miri) { 50 } else { 10000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1155,7 +1155,7 @@ mod webkit_queue_test {
             num_producers: 10,
             num_consumers: 1,
             max_queue_size: 100,
-            messages_per_producer: 10000,
+            messages_per_producer: if cfg!(miri) { 50 } else { 10000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1164,7 +1164,7 @@ mod webkit_queue_test {
             num_producers: 10,
             num_consumers: 1,
             max_queue_size: 100,
-            messages_per_producer: 10000,
+            messages_per_producer: if cfg!(miri) { 50 } else { 10000 },
             notification_style: NotifyStyle::One,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1173,7 +1173,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 10,
             max_queue_size: 1,
-            messages_per_producer: 10000,
+            messages_per_producer: if cfg!(miri) { 50 } else { 10000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1182,7 +1182,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 10,
             max_queue_size: 100,
-            messages_per_producer: 100_000,
+            messages_per_producer: if cfg!(miri) { 100 } else { 100_000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1191,7 +1191,7 @@ mod webkit_queue_test {
             num_producers: 1,
             num_consumers: 10,
             max_queue_size: 100,
-            messages_per_producer: 100_000,
+            messages_per_producer: if cfg!(miri) { 100 } else { 100_000 },
             notification_style: NotifyStyle::One,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1200,7 +1200,7 @@ mod webkit_queue_test {
             num_producers: 10,
             num_consumers: 10,
             max_queue_size: 1,
-            messages_per_producer: 50000,
+            messages_per_producer: if cfg!(miri) { 50 } else { 50000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1209,7 +1209,7 @@ mod webkit_queue_test {
             num_producers: 10,
             num_consumers: 10,
             max_queue_size: 100,
-            messages_per_producer: 50000,
+            messages_per_producer: if cfg!(miri) { 50 } else { 50000 },
             notification_style: NotifyStyle::All,
             timeout: Timeout::Forever,
             delay_seconds: 0
@@ -1218,7 +1218,7 @@ mod webkit_queue_test {
             num_producers: 10,
             num_consumers: 10,
             max_queue_size: 100,
-            messages_per_producer: 50000,
+            messages_per_producer: if cfg!(miri) { 50 } else { 50000 },
             notification_style: NotifyStyle::One,
             timeout: Timeout::Forever,
             delay_seconds: 0

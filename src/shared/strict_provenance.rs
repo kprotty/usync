@@ -26,8 +26,16 @@ unsafe impl<T> StrictProvenance for *mut T {
         self as usize
     }
 
+    #[cfg(not(miri))]
     fn with_address(self, addr: usize) -> Self {
         addr as Self
+    }
+
+    #[cfg(miri)]
+    fn with_address(self, new_addr: usize) -> Self {
+        let old_addr = self as usize;
+        let diff = new_addr.wrapping_sub(old_addr);
+        self.cast::<u8>().wrapping_add(diff).cast::<T>()
     }
 }
 

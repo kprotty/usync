@@ -121,7 +121,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
 //  --- X86 Specializations
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]
 impl RawRwLock {
     #[inline(always)]
     fn try_lock_exclusive_assuming(&self, _state: *mut Waiter) -> bool {
@@ -213,7 +213,7 @@ impl RawRwLock {
     }
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(any(miri, not(any(target_arch = "x86", target_arch = "x86_64"))))]
 impl RawRwLock {
     #[inline(always)]
     fn try_lock_exclusive_assuming(&self, mut state: *mut Waiter) -> bool {
@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn frob() {
         const N: u32 = 10;
-        const M: u32 = 1000;
+        const M: u32 = if cfg!(miri) { 100 } else { 1000 };
 
         let r = Arc::new(RwLock::new(()));
 
