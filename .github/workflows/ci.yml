@@ -10,130 +10,105 @@ on:
 
 env:
   RUST_BACKTRACE: 1
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
 
 jobs:
-  # Test on stable and MSRV
-  test:
-    name: Test Rust - ${{ matrix.build }}
-    runs-on: ${{ matrix.os }}
-    env:
-      CARGO: cargo
-      TARGET: ""
-      RUSTFLAGS: -Dwarnings
-    strategy:
-      fail-fast: false
-      matrix:
-        build:
-          - macos
-          - linux
-          - linux32
-          - win64-msvc
-          - win64-gnu
-          - win32-msvc
-          - win32-gnu
-          - msrv
-          - beta
-          - nightly
-          - arm32
-          - arm64
-        include:
-          - build: linux
-            os: ubuntu-latest
-            rust: stable
-          - build: macos
-            os: macos-latest
-            rust: stable
-          - build: win64-msvc
-            os: windows-2019
-            rust: stable
-          - build: win64-gnu
-            os: windows-2019
-            rust: stable-x86_64-gnu
-          - build: win32-msvc
-            os: windows-2019
-            rust: stable-i686-msvc
-          - build: win32-gnu
-            os: windows-2019
-            rust: stable-i686-gnu
-          - build: beta
-            os: ubuntu-latest
-            rust: beta
-          - build: nightly
-            os: ubuntu-latest
-            rust: nightly
-          - build: linux32
-            os: ubuntu-latest
-            rust: stable
-            target: i686-unknown-linux-gnu
-          # These should prob. be more generic arm targets and not
-          # android, but *shrug*
-          - build: arm32
-            os: ubuntu-latest
-            rust: stable
-            target: armv7-linux-androideabi
-          - build: arm64
-            os: ubuntu-latest
-            rust: stable
-            target: aarch64-linux-android
-
-    steps:
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 1
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: ${{ matrix.rust }}
-          profile: minimal
-          override: true
-
-      - name: Setup cross if needed
-        if: matrix.target != ''
-        run: |
-          cargo install cross
-          echo "CARGO=cross" >> $GITHUB_ENV
-          echo "TARGET=--target ${{ matrix.target }}" >> $GITHUB_ENV
-      - name: Show command used for Cargo
-        run: |
-          echo "cargo command is: ${{ env.CARGO }}"
-          echo "target flag is: ${{ env.TARGET }}"
-
-      - run: ${{ env.CARGO }} test --verbose ${{ env.TARGET }}
-      - run: ${{ env.CARGO }} test --all-features --verbose ${{ env.TARGET }}
-
-  # Check no warnings.
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: -Dwarnings
-    strategy:
-      fail-fast: false
-      matrix:
-        rust: [stable, nightly]
-    steps:
-      - uses: actions/checkout@v2
-      - uses: hecrj/setup-rust-action@v1
-        with:
-          rust-version: ${{ matrix.rust }}
-      - run: cargo check --all-targets --verbose
-      - run: cargo check --all-targets --verbose --all-features
-
-  # Ensure patch is formatted.
-  fmt:
+  rustfmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
         with:
-          fetch-depth: 1
-      - uses: hecrj/setup-rust-action@v1
-        with:
-          rust-version: stable
+          toolchain: stable
+          override: true
           components: rustfmt
       - run: cargo fmt --all -- --check
-# Sanitizers don't pass yet... 😢
+      - run: cargo fmt --manifest-path benchmark/Cargo.toml --all -- --check
+  check-warnings:
+    name: Check for build failures/warnings on ${{ matrix.target }} (rust ${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -Dwarnings
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [nightly, stable]
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          override: true
+          target: ${{ matrix.target }}
+          components: rust-src
+      - run: cargo check --all-targets --verbose --target=${{ matrix.target }}
+      - run: cargo check --all-targets --verbose --all-features --target=${{ matrix.target }}
+      - run: cargo check --manifest-path benchmark/Cargo.toml --all-targets --verbose --target=${{ matrix.target }}
 
+  test:
+    name: Test ${{ matrix.rust }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        rust: [nightly, stable]
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: ${{ matrix.rust }}
+          override: true
+      - run: cargo test --verbose
+      - run: cargo test --verbose --all-features
+
+  test-cross:
+    name: Cross Test ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          # 32/64 bit arm
+          - armv7-unknown-linux-gnueabihf
+          - aarch64-unknown-linux-gnu
+          # 32bit x86 (with/without decent instructions)
+          - i686-unknown-linux-gnu
+          - i586-unknown-linux-gnu
+          # # 32bit big endian
+          # - mips-unknown-linux-gnu
+          # - mips64-unknown-linux-gnuabi64
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          profile: minimal
+          target: ${{ matrix.target }}
+          components: rust-src
+      - uses: taiki-e/install-action@cross
+      - run: cross test --verbose --target=${{ matrix.target }}
+
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          profile: minimal
+          components: miri, rust-src
+      # Note: Can't use strict miri flags til it gets more support for atomic
+      # ops on pointers
+      - run: cargo miri test
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
 #  sanitizers:
 #    name: Test sanitizer ${{ matrix.sanitizer }}
 #    runs-on: ubuntu-latest
