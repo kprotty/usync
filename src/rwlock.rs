@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 use super::shared::{fence_acquire, invalid_mut, AtomicPtrRmw, SpinWait, StrictProvenance, Waiter};
 use std::{
     fmt,
@@ -72,13 +73,13 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
     #[inline]
     fn is_locked(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
-        state.addr() & LOCKED != 0
+        state.address() & LOCKED != 0
     }
 
     #[inline]
     fn is_locked_exclusive(&self) -> bool {
         let state = self.state.load(Ordering::Relaxed);
-        state.addr() & (LOCKED | READING) == LOCKED
+        state.address() & (LOCKED | READING) == LOCKED
     }
 
     #[inline]
@@ -120,7 +121,7 @@ unsafe impl lock_api::RawRwLock for RawRwLock {
 
 //  --- X86 Specializations
 
-#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), not(miri)))]
 impl RawRwLock {
     #[inline(always)]
     fn try_lock_exclusive_assuming(&self, _state: *mut Waiter) -> bool {
@@ -164,12 +165,12 @@ impl RawRwLock {
         // On x86, we unlock the exclusive lock first, then try and wake later.
         // This is faster than using a `lock cmpxchg` loop as it doesn't have
         // to fail and retry from other threads updating QUEUE_LOCKED bit or queueing themselves.
-        let locked = ptr::null_mut::<Waiter>().with_addr(LOCKED);
+        let locked = ptr::null_mut::<Waiter>().with_address(LOCKED);
         let state = self.state.fetch_sub(locked, Ordering::Release);
-        debug_assert_eq!(state.addr() & (LOCKED | READING), LOCKED);
+        debug_assert_eq!(state.address() & (LOCKED | READING), LOCKED);
 
         // Only try to unpark if there's no QUEUE_LOCKED owner yet and if there's threads queued.
-        if state.addr() & (QUEUED | QUEUE_LOCKED) == QUEUED {
+        if state.address() & (QUEUED | QUEUE_LOCKED) == QUEUED {
             self.try_unpark();
         }
     }
@@ -179,12 +180,12 @@ impl RawRwLock {
         // On x86, we unlock the shared lock first, then try and wake later.
         // This is faster than using a `lock cmpxchg` loop as it doesn't have
         // to fail and retry from other threads updating QUEUE_LOCKED bit or queueing themselves.
-        let read_locked = ptr::null_mut::<Waiter>().with_addr(LOCKED | READING);
+        let read_locked = ptr::null_mut::<Waiter>().with_address(LOCKED | READING);
         let state = self.state.fetch_sub(read_locked, Ordering::Release);
-        debug_assert_eq!(state.addr() & (LOCKED | READING), LOCKED | READING);
+        debug_assert_eq!(state.address() & (LOCKED | READING), LOCKED | READING);
 
         // Only try to unpark if there's no QUEUE_LOCKED owner yet and if there's threads queued.
-        if state.addr() & (QUEUED | QUEUE_LOCKED) == QUEUED {
+        if state.address() & (QUEUED | QUEUE_LOCKED) == QUEUED {
             self.try_unpark();
         }
     }
@@ -197,8 +198,8 @@ impl RawRwLock {
         // - theres no lock holder, as they can be the ones to do the wake up
         // - there are still threads queued to actually wake up
         // - the QUEUE_LOCKED bit isnt held as someone is already doing wake up
-        while state.addr() & (LOCKED | QUEUED | QUEUE_LOCKED) == QUEUED {
-            let new_state = state.map_addr(|addr| addr | QUEUE_LOCKED);
+        while state.address() & (LOCKED | QUEUED | QUEUE_LOCKED) == QUEUED {
+            let new_state = state.map_address(|addr| addr | QUEUE_LOCKED);
             match self.state.compare_exchange_weak(
                 state,
                 new_state,
@@ -212,14 +213,14 @@ impl RawRwLock {
     }
 }
 
-#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+#[cfg(any(miri, not(any(target_arch = "x86", target_arch = "x86_64"))))]
 impl RawRwLock {
     #[inline(always)]
     fn try_lock_exclusive_assuming(&self, mut state: *mut Waiter) -> bool {
-        while state.addr() & LOCKED == 0 {
+        while state.address() & LOCKED == 0 {
             match self.state.compare_exchange_weak(
                 state,
-                state.map_addr(|addr| addr | LOCKED),
+                state.map_address(|addr| addr | LOCKED),
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ) {
@@ -268,11 +269,11 @@ impl RawRwLock {
     unsafe fn unlock_and_unpark(&self) {
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
-            assert_ne!(state.addr() & LOCKED, 0);
-            assert_ne!(state.addr() & QUEUED, 0);
+            assert_ne!(state.address() & LOCKED, 0);
+            assert_ne!(state.address() & QUEUED, 0);
 
             // Unlocks the rwlock and tries to grab the QUEUE_LOCKED bit for wake up.
-            let new_state = state.map_addr(|mut addr| {
+            let new_state = state.map_address(|mut addr| {
                 addr &= !(LOCKED | READING);
                 addr |= QUEUE_LOCKED;
                 addr
@@ -288,7 +289,7 @@ impl RawRwLock {
                 continue;
             }
 
-            if state.addr() & QUEUE_LOCKED == 0 {
+            if state.address() & QUEUE_LOCKED == 0 {
                 self.unpark(new_state);
             }
 
@@ -306,8 +307,8 @@ impl RawRwLock {
         state: *mut Waiter,
     ) -> Option<Result<*mut Waiter, *mut Waiter>> {
         // Returns None if the lock is held by a writer
-        if state.addr() != UNLOCKED {
-            if state.addr() & (LOCKED | READING | QUEUED) != (LOCKED | READING) {
+        if state.address() != UNLOCKED {
+            if state.address() & (LOCKED | READING | QUEUED) != (LOCKED | READING) {
                 return None;
             }
         }
@@ -317,10 +318,10 @@ impl RawRwLock {
         // Overflow is very unlikely though as it requires `usize::MAX >> 4` active readers at once.
         // On a system where `usize` is 64 bits, that's over a quintillion (1 million ^ 5) readers.
         // On a system where `usize` is 32 bits, that's still over 260 million readers.
-        if let Some(with_reader) = state.addr().checked_add(1 << READER_SHIFT) {
+        if let Some(with_reader) = state.address().checked_add(1 << READER_SHIFT) {
             return Some(self.state.compare_exchange_weak(
                 state,
-                state.with_addr(with_reader | LOCKED | READING),
+                state.with_address(with_reader | LOCKED | READING),
                 Ordering::Acquire,
                 Ordering::Relaxed,
             ));
@@ -352,14 +353,14 @@ impl RawRwLock {
     unsafe fn unlock_shared_fast(&self) -> bool {
         // Just go to the slow path if we're not the only reader
         let state = self.state.load(Ordering::Relaxed);
-        if state.addr() != SINGLE_READER {
+        if state.address() != SINGLE_READER {
             return false;
         }
 
         self.state
             .compare_exchange(
-                state.with_addr(SINGLE_READER),
-                state.with_addr(UNLOCKED),
+                state.with_address(SINGLE_READER),
+                state.with_address(UNLOCKED),
                 Ordering::Release,
                 Ordering::Relaxed,
             )
@@ -372,14 +373,14 @@ impl RawRwLock {
         // This only works because the Remaining bits still point to the reader count.
         // When threads start waiting, they override these bits with the queue pointer.
         let mut state = self.state.load(Ordering::Relaxed);
-        while state.addr() & QUEUED == 0 {
-            assert_ne!(state.addr() & LOCKED, 0);
-            assert_ne!(state.addr() & READING, 0);
-            assert_ne!(state.addr() >> READER_SHIFT, 0);
+        while state.address() & QUEUED == 0 {
+            assert_ne!(state.address() & LOCKED, 0);
+            assert_ne!(state.address() & READING, 0);
+            assert_ne!(state.address() >> READER_SHIFT, 0);
 
-            let mut new_state = state.map_addr(|addr| addr - (1 << READER_SHIFT));
-            if state.addr() == SINGLE_READER {
-                new_state = state.with_addr(UNLOCKED);
+            let mut new_state = state.map_address(|addr| addr - (1 << READER_SHIFT));
+            if state.address() == SINGLE_READER {
+                new_state = state.with_address(UNLOCKED);
             }
 
             match self.state.compare_exchange_weak(
@@ -395,9 +396,9 @@ impl RawRwLock {
 
         // The'ers threads waiting on the RwLock.
         // The reader count has moved to the tail of the queue.
-        assert_ne!(state.addr() & LOCKED, 0);
-        assert_ne!(state.addr() & QUEUED, 0);
-        assert_ne!(state.addr() & READING, 0);
+        assert_ne!(state.address() & LOCKED, 0);
+        assert_ne!(state.address() & QUEUED, 0);
+        assert_ne!(state.address() & READING, 0);
 
         // Find the tail of the wait queue while also caching it at the current head.
         // As long as the Waiter writes are atomic, this can be soundly racing with
@@ -424,7 +425,7 @@ impl RawRwLock {
     fn lock_exclusive_slow(&self) {
         let is_writer = true;
         let try_lock = |state: *mut Waiter| -> Option<bool> {
-            match state.addr() & LOCKED {
+            match state.address() & LOCKED {
                 0 => Some(self.try_lock_exclusive_assuming(state)),
                 _ => None,
             }
@@ -468,7 +469,7 @@ impl RawRwLock {
                     // We can't acquire the RwLock at the moment.
                     // Try to spin for a little in hopes the RwLock is released quickly.
                     // Also don't spin if threads are waiting as we should start waiting too.
-                    if (state.addr() & QUEUED == 0) && spin.try_yield_now() {
+                    if (state.address() & QUEUED == 0) && spin.try_yield_now() {
                         state = self.state.load(Ordering::Relaxed);
                         continue;
                     }
@@ -493,7 +494,7 @@ impl RawRwLock {
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
             // Don't requeue if the waiter (which is a writer) could acquire the lock.
-            if state.addr() & LOCKED == 0 {
+            if state.address() & LOCKED == 0 {
                 return false;
             }
 
@@ -507,15 +508,15 @@ impl RawRwLock {
     unsafe fn try_queue(&self, state: &mut *mut Waiter, waiter: Pin<&Waiter>) -> bool {
         // Prepare to push our waiter to the head of the wait queue.
         let waiter_ptr = NonNull::from(&*waiter).as_ptr();
-        let mut new_state = waiter_ptr.map_addr(|addr| {
-            let state_bits = (*state).addr() & !Waiter::MASK;
+        let mut new_state = waiter_ptr.map_address(|addr| {
+            let state_bits = (*state).address() & !Waiter::MASK;
             addr | state_bits | QUEUED
         });
 
-        if (*state).addr() & QUEUED == 0 {
+        if (*state).address() & QUEUED == 0 {
             // The first queued waiter will be the tail and it now needs to
             // track the readers since its overriding the remaining state bits.
-            let readers = (*state).addr() >> READER_SHIFT;
+            let readers = (*state).address() >> READER_SHIFT;
             waiter.counter.store(readers, Ordering::Relaxed);
 
             // The first queued waiter also sets its `tail` field to itself.
@@ -526,8 +527,8 @@ impl RawRwLock {
         } else {
             // The thread which holds the QUEUE_LOCKED bit, or active read-lock holders, will update the queue.
             // Since there's multiple waiting threads now, try to grab the QUEUE_LOCKED bit in order to update the queue.
-            let head = NonNull::new((*state).map_addr(|addr| addr & Waiter::MASK));
-            new_state = new_state.map_addr(|addr| addr | QUEUE_LOCKED);
+            let head = NonNull::new((*state).map_address(|addr| addr & Waiter::MASK));
+            new_state = new_state.map_address(|addr| addr | QUEUE_LOCKED);
 
             // Other waiters will link themselves onto the waiter queue in a stack-like fashion;
             // Leaving the `tail` field unset for Waiter::get_and_link_queue() to traverse and cache the found tail.
@@ -548,7 +549,7 @@ impl RawRwLock {
             return false;
         }
 
-        if (*state).addr() & (QUEUED | QUEUE_LOCKED) == QUEUED {
+        if (*state).address() & (QUEUED | QUEUE_LOCKED) == QUEUED {
             self.link_queue_or_unpark(new_state);
         }
 
@@ -558,14 +559,14 @@ impl RawRwLock {
     #[cold]
     unsafe fn link_queue_or_unpark(&self, mut state: *mut Waiter) {
         loop {
-            assert_ne!(state.addr() & QUEUED, 0);
-            assert_ne!(state.addr() & QUEUE_LOCKED, 0);
+            assert_ne!(state.address() & QUEUED, 0);
+            assert_ne!(state.address() & QUEUE_LOCKED, 0);
 
             // If the lock holders released the lock,
             // we are now in charge of waking up threads since we hold the QUEUE_LOCKED bit.
             // This is due to the lock-releasing thread skipping thread-wakeup
             // if the QUEUE_LOCKED bit is set as we can take over its job.
-            if state.addr() & LOCKED == 0 {
+            if state.address() & LOCKED == 0 {
                 return self.unpark(state);
             }
 
@@ -578,7 +579,7 @@ impl RawRwLock {
             // Release barrier to ensure the writes we did above happen before the next QUEUE_LOCKED bit holder.
             match self.state.compare_exchange_weak(
                 state,
-                state.map_addr(|addr| addr & !QUEUE_LOCKED),
+                state.map_address(|addr| addr & !QUEUE_LOCKED),
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
@@ -591,17 +592,17 @@ impl RawRwLock {
     #[cold]
     unsafe fn unpark(&self, mut state: *mut Waiter) {
         loop {
-            assert_ne!(state.addr() & QUEUED, 0);
-            assert_ne!(state.addr() & QUEUE_LOCKED, 0);
+            assert_ne!(state.address() & QUEUED, 0);
+            assert_ne!(state.address() & QUEUE_LOCKED, 0);
 
             // If the RwLock is locked by another thread while we're trying to wake one up,
             // then bail by releasing the QUEUE_LOCKED bit as the lock holder can do the wake up instead.
             // Release barrier to ensure the queue writes we've possibly done so far in Waiter::get_and_link_queue()
             // below happen before the next QUEUE_LOCKED bit holder.
-            if state.addr() & LOCKED != 0 {
+            if state.address() & LOCKED != 0 {
                 match self.state.compare_exchange_weak(
                     state,
-                    state.map_addr(|addr| addr & !QUEUE_LOCKED),
+                    state.map_address(|addr| addr & !QUEUE_LOCKED),
                     Ordering::Release,
                     Ordering::Relaxed,
                 ) {
@@ -628,7 +629,7 @@ impl RawRwLock {
                     // Release barrier ensures the head/tail updates happen before the next QUEUE_LOCKED bit owner.
                     head.as_ref().tail.set(Some(new_tail));
                     self.state
-                        .fetch_sub(state.with_addr(QUEUE_LOCKED), Ordering::Release);
+                        .fetch_sub(state.with_address(QUEUE_LOCKED), Ordering::Release);
 
                     // unpark_waiters() follows the queue backwards from the tail to the head using the `prev` field.
                     // Since we queue to the head, we dequeue from the tail.
@@ -648,7 +649,7 @@ impl RawRwLock {
             // Release barrier ensures the head/tail access above happen before we release the QUEUE_LOCKED bit before wake up.
             match self.state.compare_exchange_weak(
                 state,
-                state.map_addr(|addr| addr & !(Waiter::MASK | QUEUED | QUEUE_LOCKED)),
+                state.map_address(|addr| addr & !(Waiter::MASK | QUEUED | QUEUE_LOCKED)),
                 Ordering::Release,
                 Ordering::Relaxed,
             ) {
@@ -814,7 +815,7 @@ mod tests {
     #[test]
     fn frob() {
         const N: u32 = 10;
-        const M: u32 = 1000;
+        const M: u32 = if cfg!(miri) { 100 } else { 1000 };
 
         let r = Arc::new(RwLock::new(()));
 

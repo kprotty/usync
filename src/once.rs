@@ -77,7 +77,7 @@ impl Once {
     /// Returns the current state of this `Once`.
     pub fn state(&self) -> OnceState {
         let state = self.state.load(Ordering::Relaxed);
-        match state.addr() & !Waiter::MASK {
+        match state.address() & !Waiter::MASK {
             UNINIT => OnceState::New,
             CALLING => OnceState::InProgress,
             POISONED => OnceState::Poisoned,
@@ -143,7 +143,7 @@ impl Once {
         // Fast path to check if the state was completed.
         // Acquire barrier to ensure that Once function call and completion happens before we return.
         let state = self.state.load(Ordering::Acquire);
-        if state.addr() == COMPLETED {
+        if state.address() == COMPLETED {
             return;
         }
 
@@ -167,7 +167,7 @@ impl Once {
         // Fast path to check if the state was completed.
         // Acquire barrier to ensure that Once function call and completion happens before we return.
         let state = self.state.load(Ordering::Acquire);
-        if state.addr() == COMPLETED {
+        if state.address() == COMPLETED {
             return;
         }
 
@@ -186,24 +186,24 @@ impl Once {
             loop {
                 // Once the state is completed, we can return.
                 // Acquire barrier to ensure the Once function call and completion happen before we return.
-                if state.addr() == COMPLETED {
+                if state.address() == COMPLETED {
                     fence_acquire(&self.state);
                     return;
                 }
 
                 // Check for poision and panic if the caller can't ignore it.
                 // Acquire barrier to ensure the Once function call panic happened before we return.
-                if state.addr() == POISONED && !ignore_poison {
+                if state.address() == POISONED && !ignore_poison {
                     fence_acquire(&self.state);
                     panic!("Once instance was previously poisoned");
                 }
 
                 // There is a thread in the middle of calling their function on the Once.
                 // Queue our waiter in order to wait for them to finish calling.
-                if state.addr() & !Waiter::MASK == CALLING {
+                if state.address() & !Waiter::MASK == CALLING {
                     // Try to spin a little bit in hopes that they finish the function call soon.
                     // Don't spin if there's already threads waiting as we should start waiting too.
-                    let head = NonNull::new(state.map_addr(|addr| addr & Waiter::MASK));
+                    let head = NonNull::new(state.map_address(|addr| addr & Waiter::MASK));
                     if head.is_none() && spin.try_yield_now() {
                         state = self.state.load(Ordering::Relaxed);
                         continue;
@@ -212,7 +212,7 @@ impl Once {
                     // Push our waiter to the queue in a stack-like manner.
                     waiter.next.set(head);
                     let waiter_ptr = NonNull::from(&*waiter).as_ptr();
-                    let new_state = waiter_ptr.map_addr(|addr| addr | CALLING);
+                    let new_state = waiter_ptr.map_address(|addr| addr | CALLING);
 
                     // Release barrier to ensure our waiter's writes happen before the calling thread
                     // iterates the queue in order to wake us up.
@@ -234,7 +234,7 @@ impl Once {
 
                 match self.state.compare_exchange_weak(
                     state,
-                    state.with_addr(CALLING),
+                    state.with_address(CALLING),
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
@@ -263,9 +263,9 @@ impl Once {
                 // AcqRel as Acquire to ensure writes to pushed waiters happen before we iterate and wake them below.
                 // AcqRel as Release to ensure our function call happens before the waiters return from call_once_*.
                 let state = self.once.state.swap(self.reset_to, Ordering::AcqRel);
-                assert_eq!(state.addr() & 0b11, CALLING);
+                assert_eq!(state.address() & 0b11, CALLING);
 
-                let mut waiters = NonNull::new(state.map_addr(|addr| addr & Waiter::MASK));
+                let mut waiters = NonNull::new(state.map_address(|addr| addr & Waiter::MASK));
                 while let Some(waiter) = waiters {
                     unsafe {
                         waiters = waiter.as_ref().next.get();
@@ -279,10 +279,10 @@ impl Once {
         // If the function call below panics, it will poison the Once.
         let mut state_guard = StateGuard {
             once: self,
-            reset_to: old_state.with_addr(POISONED),
+            reset_to: old_state.with_address(POISONED),
         };
 
-        f(match old_state.addr() {
+        f(match old_state.address() {
             UNINIT => OnceState::New,
             POISONED => OnceState::Poisoned,
             _ => unreachable!("invalid once state on invokation"),
@@ -290,7 +290,7 @@ impl Once {
 
         // The function call completed safely,
         // so resolve the Once with COMPLETED instead of POISONED.
-        state_guard.reset_to = old_state.with_addr(COMPLETED);
+        state_guard.reset_to = old_state.with_address(COMPLETED);
         drop(state_guard);
     }
 }
