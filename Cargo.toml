@@ -1,11 +1,10 @@
 [package]
 name = "usync"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["kprotty"]
 readme = "README.md"
-homepage = "https://github.com/kprotty"
 documentation = "https://docs.rs/usync"
 repository = "https://github.com/kprotty/usync"
 description = "fast, drop-in, synchronization primitives"
