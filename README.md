@@ -73,14 +73,14 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-usync = "0.1.0"
+usync = "0.2.0"
 ```
 
 To enable nightly-only features, add this to your `Cargo.toml` instead:
 
 ```toml
 [dependencies]
-usync = { version = "0.1.0", features = ["nightly"] }
+usync = { version = "0.2.0", features = ["nightly"] }
 ```
 
 To allow sending `MutexGuard`s and `RwLock*Guard`s to other threads, enable the
