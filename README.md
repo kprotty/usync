@@ -3,6 +3,7 @@ usync
 
 [![Crates.io](https://img.shields.io/crates/v/usync.svg)](https://crates.io/crates/usync)
 [![Documentation](https://docs.rs/usync/badge.svg)](https://docs.rs/usync/)
+[![MSRV: 1.59.0](https://flat.badgen.net/badge/MSRV/1.59.0/purple)](https://blog.rust-lang.org/2022/02/24/Rust-1.59.0.html)
 
 This library provides implementations of `Mutex`, `RwLock`, `Condvar`, `Barrier` and
 `Once` that are word-sized and generally fast as those in [`parking_lot`](https://crates.io/crates/parking_lot).
