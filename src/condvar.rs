@@ -237,9 +237,17 @@ impl Condvar {
                 }
             };
 
-            // Now that our waiter is registered on the state,
-            // unlock the mutex in order to block the thread.
+            struct DropGuard<'a>(&'a crate::RawMutex);
+            impl<'a> Drop for DropGuard<'a> {
+                fn drop(&mut self) {
+                    self.0.lock();
+                }
+            }
+
+            // Now that our waiter is registered on the state, unlock the mutex in order to block the thread.
+            // Make sure to re-acquire the mutex back when returning (even in the case of a panic).
             raw_mutex.unlock();
+            let _drop_guard = DropGuard(raw_mutex);
 
             // Make sure to link and unset the QUEUE_LOCKED
             if signal_locked {
@@ -259,8 +267,7 @@ impl Condvar {
                 assert!(waiter.parker.park(None));
             }
 
-            // Re-acquire the mutex/rwlock and return whether we timed out.
-            raw_mutex.lock();
+            // return whether we timed out (will re-acquire the mutex when returning)
             WaitTimeoutResult(timed_out)
         })
     }
