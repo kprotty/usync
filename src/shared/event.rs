@@ -45,7 +45,7 @@ impl Event {
                 Some(timeout) => {
                     // Get the current time and lazily compute when we started waiting.
                     let now = Instant::now();
-                    let start = started.unwrap_or_else(|| Instant::now());
+                    let start = started.unwrap_or_else(|| now);
                     started = Some(start);
 
                     // Check if we've been waiting for longer than the timeout
