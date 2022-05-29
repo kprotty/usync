@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        rust: [nightly, stable]
+        rust: [nightly, stable, 1.59.0]
         target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
     steps:
       - uses: actions/checkout@v3
@@ -55,7 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
-        rust: [nightly, stable]
+        rust: [nightly, stable, 1.59.0]
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rs/toolchain@v1
