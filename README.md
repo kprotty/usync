@@ -14,7 +14,6 @@ It also provides a `ReentrantMutex` type which supports recursive locking.
 The primitives provided by this library have several advantages over those
 in the Rust standard library:
 
-
 1. All types require only 1 word of storage (unlike stdlib which stores
    more state for poison detection).
 2. Static initializers for all types (stdlib doesn't yet have this for Barrier).
