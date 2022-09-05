@@ -14,16 +14,12 @@ It also provides a `ReentrantMutex` type which supports recursive locking.
 The primitives provided by this library have several advantages over those
 in the Rust standard library:
 
-1. All types require only require 1 word of storage space. On the other hand on
-   some platforms (macOS and a few others) the standard library primitives require a
-   dynamically allocated `Box` to hold OS-specific synchronization primitives.
-   The small size of `Mutex` in particular encourages the use of fine-grained
-   locks to increase parallelism.
-2. Since they consist of just a single atomic variable, have constant
-   initializers and don't need destructors, these primitives can be used as
-   `static` global variables.
-3. Uncontended lock acquisition and release is done through fast inline
-   paths which only require a single atomic operation.
+
+1. All types require only 1 word of storage (unlike stdlib which stores
+   more state for poison detection).
+2. Static initializers for all types (stdlib doesn't yet have this for Barrier).
+3. Inline uncontested paths and micro-contention handled with bounded,
+   adaptive spinning.
 4. Microcontention (a contended lock with a short critical section) is
    efficiently handled by spinning a few times while trying to acquire a
    lock.
