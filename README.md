@@ -19,20 +19,14 @@ in the Rust standard library:
 2. Static initializers for all types (stdlib doesn't yet have this for Barrier).
 3. Inline uncontested paths and micro-contention handled with bounded,
    adaptive spinning.
-4. Microcontention (a contended lock with a short critical section) is
-   efficiently handled by spinning a few times while trying to acquire a
-   lock.
-5. The locks are adaptive and will suspend a thread after a few failed spin
-   attempts. This makes the locks suitable for both long and short critical
-   sections.
-6. `Condvar::notify_all` will generally only wake up a single thread and requeue the
+4. `Condvar::notify_all` will generally only wake up a single thread and requeue the
     rest to wait on the associated `Mutex`. This avoids a thundering herd
     problem where all threads try to acquire the lock at the same time.
-7. `Mutex` and `RwLock` allow raw unlocking without a RAII guard object.
-8. `Mutex<()>` and `RwLock<()>` allow raw locking without a RAII guard
+5. `Mutex` and `RwLock` allow raw unlocking without a RAII guard object.
+6. `Mutex<()>` and `RwLock<()>` allow raw locking without a RAII guard
     object.
-9. A `ReentrantMutex` type which supports recursive locking.
-10. Lock guards can be sent to other threads when the `send_guard` feature is
+7. A `ReentrantMutex` type which supports recursive locking.
+8. Lock guards can be sent to other threads when the `send_guard` feature is
     enabled.
 
 ## Userspace queues
