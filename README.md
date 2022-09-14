@@ -22,11 +22,9 @@ in the Rust standard library:
 4. `Condvar::notify_all` will generally only wake up a single thread and requeue the
     rest to wait on the associated `Mutex`. This avoids a thundering herd
     problem where all threads try to acquire the lock at the same time.
-5. `Mutex` and `RwLock` allow raw unlocking without a RAII guard object.
-6. `Mutex<()>` and `RwLock<()>` allow raw locking without a RAII guard
-    object.
-7. A `ReentrantMutex` type which supports recursive locking.
-8. Lock guards can be sent to other threads when the `send_guard` feature is
+5. `Mutex` and `RwLock` allow raw locking and unlocking without a RAII guard object.
+6. A `ReentrantMutex` type which supports recursive locking.
+7. Lock guards can be sent to other threads when the `send_guard` feature is
     enabled.
 
 ## Userspace queues
