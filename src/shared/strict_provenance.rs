@@ -48,6 +48,8 @@ pub(crate) trait AtomicPtrRmw<T> {
     fn fetch_add(&self, value: T, ordering: Ordering) -> T;
 
     fn fetch_sub(&self, value: T, ordering: Ordering) -> T;
+
+    fn fetch_ptr_or(&self, value: T, ordering: Ordering) -> T;
 }
 
 impl<T> AtomicPtrRmw<*mut T> for AtomicPtr<T> {
@@ -66,6 +68,15 @@ impl<T> AtomicPtrRmw<*mut T> for AtomicPtr<T> {
                 .cast::<AtomicUsize>()
                 .as_ref()
                 .fetch_sub(value.address(), ordering) as *mut T
+        }
+    }
+
+    fn fetch_ptr_or(&self, value: *mut T, ordering: Ordering) -> *mut T {
+        unsafe {
+            NonNull::from(self)
+                .cast::<AtomicUsize>()
+                .as_ref()
+                .fetch_or(value.address(), ordering) as *mut T
         }
     }
 }
