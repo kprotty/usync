@@ -131,33 +131,15 @@ impl RawRwLock {
 
     #[inline(always)]
     fn try_lock_exclusive_fast(&self) -> bool {
-        // On x86, `lock bts` is often faster for acquiring exclusive ownership
-        // than a `lock cmpxchg` as the former wont spuriously fail when a thread
-        // is updating the QUEUE_LOCKED bit or adding themselves to the queue.
-        unsafe {
-            let mut old_locked_bit: u8;
-            #[cfg(target_pointer_width = "64")]
-            std::arch::asm!(
-                "lock bts qword ptr [{0:r}], 0",
-                "setc {1}",
-                in(reg) &self.state,
-                out(reg_byte) old_locked_bit,
-                options(nostack),
-            );
-            #[cfg(target_pointer_width = "32")]
-            std::arch::asm!(
-                "lock bts dword ptr [{0:e}], 0",
-                "setc {1}",
-                in(reg) &self.state,
-                out(reg_byte) old_locked_bit,
-                options(nostack),
-            );
-            let acquired = old_locked_bit == 0;
-            if acquired {
-                fence_acquire(&self.state);
-            }
-            acquired
-        }
+        // Since 1.65, rustc lowers this to a single `lock bts` on x86, which
+        // is often faster for acquiring exclusive ownership than a `lock cmpxchg`
+        // as the former wont spuriously fail when a thread is updating the
+        // QUEUE_LOCKED bit or adding themselves to the queue.
+        self.state
+            .fetch_ptr_or(invalid_mut(LOCKED), Ordering::Acquire)
+            .address()
+            & LOCKED
+            != LOCKED
     }
 
     #[inline(always)]
