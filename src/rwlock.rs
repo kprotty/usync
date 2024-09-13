@@ -2,6 +2,7 @@
 use super::shared::{fence_acquire, invalid_mut, AtomicPtrRmw, SpinWait, StrictProvenance, Waiter};
 use std::{
     fmt,
+    hint::spin_loop,
     pin::Pin,
     ptr::{self, NonNull},
     sync::atomic::{AtomicPtr, Ordering},
@@ -436,15 +437,19 @@ impl RawRwLock {
             loop {
                 let mut state = self.state.load(Ordering::Relaxed);
                 loop {
-                    // Try to acquire the RwLock.
-                    // On failure, spins a bit to decrease cache-line contension.
-                    let mut backoff = SpinWait::default();
+                    // Try to acquire the RwLock. On failure, spins a bit to decrease cache-line contention.
+                    // Backoff spins for a random amount of iterations between 32 and 128 as per libdispatch:
+                    // https://github.com/apple/swift-corelibs-libdispatch/blob/29babc17e2559339e48c163f4c02ed3356a7123f/src/shims/yield.h#L113
+                    let mut prng = &*waiter as *const Waiter as usize as u32;
                     while let Some(was_locked) = try_lock(state) {
                         if was_locked {
                             return;
                         }
 
-                        backoff.yield_now();
+                        let spin_count = ((prng >> 24) & (128 - 1)) | (32 - 1);
+                        prng = prng.wrapping_mul(1103515245).wrapping_add(12345);
+                        (0..spin_count).for_each(|_| spin_loop());
+
                         state = self.state.load(Ordering::Relaxed);
                     }
 

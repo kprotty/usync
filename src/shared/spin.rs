@@ -17,6 +17,20 @@ impl SpinWait {
             return false;
         }
 
+        // On ARM64 systems, spin with WFE for a while as its often more efficient for contention than yield.
+        // The value of 10 comes from apple libdispatch/GCD:
+        // https://github.com/apple/swift-corelibs-libdispatch/blob/29babc17e2559339e48c163f4c02ed3356a7123f/src/shims/yield.h#L63
+        #[cfg(all(not(miri), target_arch = "aarch64"))]
+        {
+            if self.counter >= 10 {
+                return false;
+            }
+
+            unsafe { std::arch::asm!("wfe", options(preserves_flags, nostack)) };
+            self.counter += 1;
+            return true;
+        }
+
         // Spin for at most 100 times.
         // This could be lower but this works as is also the default spin count in musl
         // as well as glibc PTHREAD_MUTEX_ADAPTIVE_SPIN.
@@ -27,22 +41,6 @@ impl SpinWait {
         self.counter += 1;
         spin_loop();
         true
-    }
-
-    pub(crate) fn yield_now(&mut self) {
-        // Don't spin if we're on a uni-core system (e.g. docker instance or low-end vps/vm)
-        if !is_multi_core() {
-            return;
-        }
-
-        // Spin using exponential backoff.
-        // parking_lot has the spin count capped at (1 << 10) = 1024
-        // but we probably don't need to spin that long to avoid cache-line contention
-        // so we cap it at (1 << 5) = 32 instead (this is still fairly arbitrary).
-        self.counter += 1;
-        for _ in 0..(1 << self.counter.min(5)) {
-            spin_loop();
-        }
     }
 }
 
