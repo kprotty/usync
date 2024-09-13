@@ -16,15 +16,14 @@ in the Rust standard library:
 
 1. All types require only 1 word of storage (unlike stdlib which stores
    more state for poison detection).
-2. Static initializers for all types (stdlib doesn't yet have this for Barrier).
-3. Inline uncontested paths and micro-contention handled with bounded,
+2. Inline uncontested paths and micro-contention handled with bounded,
    adaptive spinning.
-4. `Condvar::notify_all` will generally only wake up a single thread and requeue the
+3. `Condvar::notify_all` will generally only wake up a single thread and requeue the
     rest to wait on the associated `Mutex`. This avoids a thundering herd
     problem where all threads try to acquire the lock at the same time.
-5. `Mutex` and `RwLock` allow raw locking and unlocking without a RAII guard object.
-6. A `ReentrantMutex` type which supports recursive locking.
-7. Lock guards can be sent to other threads when the `send_guard` feature is
+4. `Mutex` and `RwLock` allow raw locking and unlocking without a RAII guard object.
+5. A `ReentrantMutex` type which supports recursive locking.
+6. Lock guards can be sent to other threads when the `send_guard` feature is
     enabled.
 
 ## Userspace queues
