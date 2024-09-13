@@ -1,14 +1,10 @@
 mod event;
 mod parker;
 mod spin;
-mod strict_provenance;
 mod waiter;
 
-pub(crate) use self::{
-    spin::SpinWait,
-    strict_provenance::{invalid_mut, AtomicPtrRmw, StrictProvenance},
-    waiter::Waiter,
-};
+pub(crate) use self::{spin::SpinWait, waiter::Waiter};
+pub(crate) use sptr::{invalid_mut, Strict as StrictProvenance};
 
 use std::sync::atomic::{fence, AtomicPtr, Ordering};
 
