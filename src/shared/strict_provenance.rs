@@ -47,6 +47,7 @@ use std::{
 pub(crate) trait AtomicPtrRmw<T> {
     fn fetch_sub(&self, value: T, ordering: Ordering) -> T;
 
+    #[allow(unused)]
     fn fetch_ptr_or(&self, value: T, ordering: Ordering) -> T;
 }
 

@@ -1,5 +1,4 @@
 use std::{
-    hint::spin_loop,
     num::NonZeroUsize,
     sync::atomic::{AtomicUsize, Ordering},
     thread::available_parallelism,
@@ -22,24 +21,26 @@ impl SpinWait {
         // https://github.com/apple/swift-corelibs-libdispatch/blob/29babc17e2559339e48c163f4c02ed3356a7123f/src/shims/yield.h#L63
         #[cfg(all(not(miri), target_arch = "aarch64"))]
         {
-            if self.counter >= 10 {
+            if self.counter < 10 {
+                unsafe { std::arch::asm!("wfe", options(preserves_flags, nostack)) };
+            } else {
                 return false;
             }
-
-            unsafe { std::arch::asm!("wfe", options(preserves_flags, nostack)) };
-            self.counter += 1;
-            return true;
         }
 
-        // Spin for at most 100 times.
-        // This could be lower but this works as is also the default spin count in musl
-        // as well as glibc PTHREAD_MUTEX_ADAPTIVE_SPIN.
-        if self.counter >= 100 {
-            return false;
+        #[cfg(any(miri, not(target_arch = "aarch64")))]
+        {
+            // Spin for at most 100 times.
+            // This could be lower but this works as is also the default spin count in musl
+            // as well as glibc PTHREAD_MUTEX_ADAPTIVE_SPIN.
+            if self.counter < 100 {
+                std::hint::spin_loop();
+            } else {
+                return false;
+            }
         }
 
         self.counter += 1;
-        spin_loop();
         true
     }
 }
