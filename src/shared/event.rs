@@ -66,10 +66,9 @@ impl Event {
 
         // Try to not leave dangling references when returning (see below)
         let is_set_ptr = &self.is_set as *const AtomicBool;
-        drop(self);
 
-        // FIXME (maybe): This is a case of https://github.com/rust-lang/rust/issues/55005.
-        // `store()` has a potentially dangling ref to `is_set` once wait() thread sees true and returns.
+        // FIXED: This is a case of https://github.com/rust-lang/rust/issues/55005.
+        // `store()` no longer has a dangling ref to `is_set` once wait() thread sees true and returns.
         // Release barrier ensures `thread.take()` happens before is_set is true and wait() thread returns.
         (*is_set_ptr).store(true, Ordering::Release);
         thread.unpark();

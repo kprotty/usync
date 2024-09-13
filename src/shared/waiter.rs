@@ -1,3 +1,4 @@
+#![allow(unstable_name_collisions)]
 use super::{parker::Parker, StrictProvenance};
 use std::{
     cell::Cell,
@@ -51,7 +52,7 @@ impl Waiter {
         value: *mut Waiter,
         mut on_waiter_discovered: impl FnMut(NonNull<Self>),
     ) -> (NonNull<Self>, NonNull<Self>) {
-        let head = NonNull::new(value.map_address(|addr| addr & Self::MASK));
+        let head = NonNull::new(value.map_addr(|addr| addr & Self::MASK));
         let head = head.expect("invalid Waiter queue head pointer");
 
         // Check if the tail is cached at the head from a previous get_and_link_queue() call.
