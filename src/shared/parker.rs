@@ -88,10 +88,9 @@ impl Parker {
         unsafe {
             // Try not to leave a dangling ref to the parker (see below).
             let event_ptr = &self.event as *const AtomicPtr<Event>;
-            drop(self);
 
-            // FIXME (maybe): This is a case of https://github.com/rust-lang/rust/issues/55005.
-            // `swap()` has a potentially dangling ref to `event_ptr` once park() thread sees notified and returns.
+            // FIXED: This is a case of https://github.com/rust-lang/rust/issues/55005.
+            // `swap()` no longer has dangling ref to `event_ptr` once park() thread sees notified and returns.
             // AcqRel as Acquire barrier to ensure Event::with() writes in park() happen before we Event::set() it below.
             // AcqRel as Release barrier to ensure that unpark() itself happens before park() returns for caller reasons.
             let notified_ptr = Self::notified().as_ptr();
