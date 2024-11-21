@@ -8,7 +8,7 @@ use std::{
 const QUEUED: usize = 1;
 const QUEUE_LOCKED: usize = 2;
 const COMPLETED: usize = 0;
-const COUNT_SHIFT: u32 = QUEUED.trailing_zeros();
+const COUNT_SHIFT: u32 = QUEUED.trailing_zeros() + 1;
 
 /// A barrier enables multiple threads to synchronize the beginning
 /// of some computation.
@@ -337,5 +337,49 @@ impl BarrierWaitResult {
     #[must_use]
     pub fn is_leader(&self) -> bool {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Barrier;
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        sync::Arc,
+        thread,
+    };
+
+    #[test]
+    fn smoke() {
+        let b = Barrier::new(1);
+        assert!(b.wait().is_leader());
+    }
+
+    #[test]
+    fn classic() {
+        let num_threads = 10;
+        let b = Arc::new(Barrier::new(num_threads + 1));
+        let has_leader = Arc::new(AtomicBool::new(false));
+
+        let threads = (0..num_threads)
+            .map(|_| {
+                thread::spawn({
+                    let b = b.clone();
+                    let has_leader = has_leader.clone();
+                    move || {
+                        if b.wait().is_leader() {
+                            assert!(!has_leader.swap(true, Ordering::Relaxed));
+                        }
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let is_leader = b.wait().is_leader();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(!is_leader, has_leader.load(Ordering::Relaxed),);
     }
 }
